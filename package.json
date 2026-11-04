@@ -1,6 +1,6 @@
 {
   "name": "notefly",
-  "version": "1.1.0",
+  "version": "1.7.0",
   "private": true,
   "description": "NoteFly · 本地多平台内容分发工作台，单引擎：NoteFly RPA",
   "license": "MIT",
@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server.js",
     "desktop": "electron .",
-    "test": "node --test tests/task-status.test.js tests/api-client.test.js tests/content-save.test.js tests/text-tools.test.js tests/text-diff.test.js tests/ai.test.js tests/gzh-render.test.js tests/data-dir.test.js tests/logger.test.js tests/server.test.js tests/batch3.test.js tests/server-recovery.test.js",
+    "test": "node --test tests/task-status.test.js tests/api-client.test.js tests/content-save.test.js tests/text-tools.test.js tests/text-tools-p0.test.js tests/text-diff.test.js tests/ai.test.js tests/ai-endpoint.test.js tests/gzh-render.test.js tests/data-dir.test.js tests/data-dir-p0.test.js tests/logger.test.js tests/server.test.js tests/server-p0.test.js tests/batch3.test.js tests/server-recovery.test.js",
     "test:ui": "node scripts/ui-smoke.js",
     "test:ai": "node scripts/ai-e2e.js",
     "test:gzh": "node scripts/gzh-e2e.js",

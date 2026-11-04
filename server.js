@@ -282,8 +282,33 @@ async function startTask(task) {
 /* RPA 执行队列：同一时刻只执行一个发布任务，避免多任务争抢同一批浏览器页面。
    任务先持久化（status=queued）再排队，执行结果写回任务对象。
    单任务异常/超时全部隔离在循环内 —— 一个任务写盘失败或卡死，不能拖垮队列里后面的任务。 */
-/* 单任务最长执行时间：10 分钟（多个平台逐个开页填充，每个都要等页面加载） */
-const TASK_EXECUTE_TIMEOUT_MS = 10 * 60 * 1000;
+/* 单任务最长执行时间：10 分钟（多个平台逐个开页填充，每个都要等页面加载）。
+   NOTEFLY_TASK_TIMEOUT_MS 仅供测试缩短（下限 50ms，防止误配 0 造成空转）。 */
+const TASK_EXECUTE_TIMEOUT_MS = Math.max(50, Number(process.env.NOTEFLY_TASK_TIMEOUT_MS) || 10 * 60 * 1000);
+/* 进行中的执行登记：taskId → runToken。
+   超时把登记删除，之后才返回的「迟到结果」会被识别并作废（P0-3） */
+const activeRuns = new Map();
+/* 这些状态的目标已代表「平台侧有动作或结论」，不允许再翻转成 unknown：
+   pending/filling/draft_saving 这类未落定状态超时后必须转 unknown 待核验 */
+const TARGET_STABLE_ON_TIMEOUT = new Set([
+  "success", "published", "failed", "ready", "needs_manual", "unknown", "accepted", "reviewing", "submitting",
+]);
+/* 这些状态的目标绝不允许再次提交/重填：重复发文无法撤回（P0-4） */
+const NO_RESUBMIT = new Set(["success", "published", "accepted", "reviewing", "submitting", "unknown"]);
+function NO_RESUBMIT_REASON(status) {
+  switch (status) {
+    case "unknown":
+      return "该平台提交结果待核验，请先核验再决定是否重试";
+    case "accepted":
+    case "reviewing":
+      return "该平台已受理/审核中，重复提交会造成重复发文，已阻止。请等待平台出结果";
+    case "submitting":
+      return "该平台正在提交中，请勿重复操作";
+    default:
+      return "该平台已确认发布，已阻止重复提交";
+  }
+}
+
 function enqueuePublish(taskId) {
   if (!publishQueue.pending.includes(taskId)) publishQueue.pending.push(taskId);
   setImmediate(runPublishQueue);
@@ -295,39 +320,63 @@ async function runPublishQueue() {
     while (publishQueue.pending.length) {
       const id = publishQueue.pending.shift();
       let task = null;
+      task = store.tasks.find((t) => t.id === id);
+      if (!task || !["queued", "creating"].includes(task.status)) continue; // 已删除或已在别处执行
+      /* 保留底层执行的引用：Promise.race 超时只代表「不再等」，RPA 还在跑 */
+      const executing = executeRpaTask(task);
       try {
-        task = store.tasks.find((t) => t.id === id);
-        if (!task || !["queued", "creating"].includes(task.status)) continue; // 已删除或已在别处执行
         await Promise.race([
-          executeRpaTask(task),
+          executing,
           new Promise((_, rej) => setTimeout(() => rej(new Error("任务执行超时（10 分钟），已中止后续等待")), TASK_EXECUTE_TIMEOUT_MS)),
         ]);
       } catch (e) {
-        /* 单任务失败/超时：只标记这一个任务，队列继续 */
+        /* 超时（executeRpaTask 自身不抛错，走到这里的只有超时定时器）：
+           1. 作废本执行的迟到结果  2. 任务进「待核验」而非 failed（failed 会解锁重发，可能造成重复发文）
+           3. 未落定的目标翻成 unknown，请用户核验 */
         const msg = String((e && e.message) || e).slice(0, 400);
-        console.error("[队列] 任务执行异常:", id, msg);
-        logger.error("发布任务", `任务执行异常：${msg}`, { 任务号: id, 标题: task ? task.title : "" });
+        activeRuns.delete(id);
+        logger.warn("发布任务", `任务执行超时，进入待核验：${msg}`, { 任务号: id, 标题: task ? task.title : "" });
         try {
           if (task) {
-            task.status = taskStatus.TASK.FAILED;
-            task.error = msg;
-            task.statusReason = /超时/.test(msg) ? "执行超时" : "执行异常";
+            const targets = (task.lastStatus && task.lastStatus.targets) || [];
+            for (const t of targets) {
+              if (!TARGET_STABLE_ON_TIMEOUT.has(t.status)) {
+                t.status = "unknown";
+                t.error = "执行超时，结果未知：请到平台后台核验是否已发布/已存草稿，再决定后续处理";
+              }
+            }
+            task.status = taskStatus.TASK.UNKNOWN;
+            task.error = "执行超时：部分平台动作可能已完成，请核验各平台状态后再处理";
+            task.statusReason = "执行超时·待核验";
+            taskStatus.syncTask(task);
             task.history = task.history || [];
-            task.history.push({ at: new Date().toISOString(), event: "queue_error", detail: msg });
+            task.history.push({ at: new Date().toISOString(), event: "queue_timeout", detail: msg });
             saveStore();
           }
         } catch (e2) {
-          console.error("[队列] 异常状态落盘失败:", e2.message);
-          logger.error("发布任务", `异常状态落盘失败：${e2.message}`, { 任务号: id });
+          console.error("[队列] 超时状态落盘失败:", e2.message);
+          logger.error("发布任务", `超时状态落盘失败：${e2.message}`, { 任务号: id });
         }
+      }
+      /* 绝不并行：前一个任务的浏览器操作真正落定之前，不放行下一个任务
+         （旧版 Promise.race 超时后立刻取下一个任务，两个 RPA 同时开页互相踩）
+         宽限期内仍未落定则强制关闭浏览器上下文，逼执行结束。 */
+      const settle = Promise.resolve(executing).catch(() => {});
+      const grace = new Promise((res) => setTimeout(res, TASK_EXECUTE_TIMEOUT_MS));
+      const settled = await Promise.race([settle.then(() => true), grace.then(() => false)]);
+      if (!settled) {
+        logger.error("发布任务", "任务执行超过宽限期，强制关闭 RPA 浏览器上下文", { 任务号: id });
+        try { await rpa.closeAll(); } catch { /* 已关就算了 */ }
+        await settle;
       }
     }
   } finally {
     publishQueue.running = false;
   }
 }
-
 async function executeRpaTask(task) {
+  const runToken = { id: task.id };
+  activeRuns.set(task.id, runToken);
   try {
     task.status = taskStatus.TASK.RUNNING;
     task.startedAt = task.startedAt || new Date().toISOString();
@@ -340,14 +389,45 @@ async function executeRpaTask(task) {
     return;
   }
   try {
-    const result = await rpa.publish(task.snapshot, task.accountIds, task.mode || "draft");
-    applyRpaResult(task, result);
+    const result = await rpa.publish(task.snapshot, task.accountIds, task.mode || "draft", {
+      /* 逐目标持久化：第一个平台完成就落盘，第二个平台卡死也不丢第一阶段记录 */
+      onProgress: (platform, target) => {
+        try {
+          if (activeRuns.get(task.id) !== runToken) return;   // 已被超时作废
+          task.progressTargets = Object.assign({}, task.progressTargets, { [platform]: target });
+          task.lastStatus = { targets: Object.values(task.progressTargets), updatedAt: new Date().toISOString() };
+          taskStatus.syncTask(task);
+          task.history = task.history || [];
+          task.history.push({ at: new Date().toISOString(), event: "target_progress", detail: `${platform} → ${target.status}` });
+          saveStore();
+        } catch { /* 进度落盘失败不影响执行 */ }
+      },
+    });
+    /* 迟到结果作废：超时时登记已删除，此刻还在 map 里才允许应用 */
+    if (activeRuns.get(task.id) !== runToken) {
+      logger.warn("发布任务", "任务超时后的迟到结果已作废（防止覆盖待核验状态）", { 任务号: task.id });
+      task.history = task.history || [];
+      task.history.push({ at: new Date().toISOString(), event: "stale_result_discarded" });
+      try { saveStore(); } catch { /* 忽略 */ }
+      return task;
+    }
+    /* 合并逐目标进度与最终结果：最终结果优先，进度补齐没走完的目标 */
+    const merged = Object.assign({}, task.progressTargets || {});
+    for (const t of (result && result.targets) || []) merged[t.platform] = t;
+    applyRpaResult(task, {
+      groupId: result && result.groupId,
+      targets: Object.values(merged),
+      open: result && result.open,
+      mode: result && result.mode,
+    });
   } catch (e) {
     task.status = taskStatus.TASK.FAILED;
     task.error = String(e.message || e).slice(0, 400);
     task.statusReason = "执行异常";
     task.history.push({ at: new Date().toISOString(), event: "rpa_error", detail: task.error });
     try { saveStore(); } catch (e2) { console.error("[队列] 结果落盘失败:", e2.message); }
+  } finally {
+    if (activeRuns.get(task.id) === runToken) activeRuns.delete(task.id);
   }
 }
 
@@ -484,7 +564,10 @@ app.post("/api/data-dir", async (req, res) => {
   let skipped = [];
   if (migrate) {
     const r = dataDir.migrate(from, check.dir);
-    if (!r.ok) return res.status(500).json({ error: r.error });
+    if (!r.ok) {
+      /* 409：目标目录有数据/复制失败。指针与内存态都没动，原目录继续可用 */
+      return res.status(409).json({ error: r.error, conflicts: r.conflicts || [] });
+    }
     moved = r.moved;
     skipped = r.skipped;
   }
@@ -868,12 +951,12 @@ app.post("/api/tasks/:groupId/submit", async (req, res) => {
   {
     const task = store.tasks.find((t) => t.groupId === req.params.groupId);
     if (!task) return res.status(404).json({ error: "任务不存在" });
-    /* 已成功 / 结果未知的目标不再重复提交，避免重复发文 */
-    const skipped = (task.lastStatus?.targets || []).filter((t) => ["success", "published", "unknown", "submitting"].includes(t.status));
+    /* 统一拦截规则（NO_RESUBMIT）：已成功/受理/审核中/提交中/结果待核验一律不再提交 */
+    const skipped = (task.lastStatus?.targets || []).filter((t) => NO_RESUBMIT.has(t.status));
     const targets = (task.lastStatus?.targets || []).filter((t) => ["ready", "needs_manual"].includes(t.status));
     if (!targets.length) {
       return res.status(409).json({
-        error: skipped.length ? "没有可提交的目标（已发布或结果待核验的平台不会重复提交）" : "没有待发布的平台",
+        error: skipped.length ? "没有可提交的目标（已发布、已受理或结果待核验的平台不会重复提交）" : "没有待发布的平台",
         skipped: skipped.map((t) => ({ accountId: t.accountId, status: t.status })),
         targets: task.lastStatus?.targets || [],
       });
@@ -881,6 +964,7 @@ app.post("/api/tasks/:groupId/submit", async (req, res) => {
     for (const t of targets) {
       t.status = "submitting";       // 先标记，失败再落回具体结果
       t.error = "";
+      saveStore();                   // 「已开始提交」先持久化，再操作平台（幂等前提）
       const r = await rpa.submitTarget(req.params.groupId, t.accountId);
       /* 提交超时不能落成 failed：平台可能已接收，落成失败会解锁重复发文。
          必须是 unknown —— 先核验，再决定是否重试 */
@@ -898,13 +982,15 @@ app.post("/api/tasks/:groupId/targets/:accountId/submit", async (req, res) => {
     if (!task) return res.status(404).json({ error: "任务不存在" });
     const tg = (task.lastStatus?.targets || []).find((x) => x.accountId === req.params.accountId);
     if (!tg) return res.status(404).json({ error: "该任务没有这个平台目标" });
-    if (["success", "published"].includes(tg.status)) {
-      return res.status(409).json({ ok: false, error: "该平台已确认发布，已阻止重复提交" });
-    }
-    if (["unknown", "submitting"].includes(tg.status)) {
-      return res.status(409).json({ ok: false, error: "该平台提交结果待核验，请先核验再决定是否重试" });
+    /* 统一拦截规则（NO_RESUBMIT）：含 accepted/reviewing —— 平台已接收的作品重复提交会造成重复发文 */
+    if (NO_RESUBMIT.has(tg.status)) {
+      return res.status(409).json({
+        ok: false,
+        error: NO_RESUBMIT_REASON(tg.status),
+      });
     }
     tg.status = "submitting";
+    saveStore();                     // 先持久化「已开始提交」，再操作平台
     const r = await rpa.submitTarget(req.params.groupId, req.params.accountId);
     tg.status = r.ok ? (r.status || "accepted") : (r.status === "unknown" ? "unknown" : "failed");
     if (r.error) tg.error = r.error;
@@ -918,14 +1004,11 @@ app.post("/api/tasks/:groupId/targets/:accountId/retry", async (req, res) => {
     const task = store.tasks.find((t) => t.groupId === req.params.groupId);
     if (!task || !task.snapshot) return res.status(404).json({ error: "任务不存在或缺快照" });
     const tg = (task.lastStatus?.targets || []).find((x) => x.accountId === req.params.accountId);
-    /* 已成功 / 正在提交 / 结果待核验的目标绝不重填重发：重复发文无法撤回，
-       unknown 必须先核验（前端弹窗里的「核验 / 打开平台」入口） */
-    if (tg && ["success", "published", "submitting", "unknown"].includes(tg.status)) {
+    /* 统一拦截规则（NO_RESUBMIT）：unknown 必须先核验；accepted/reviewing 重复重填同样危险 */
+    if (tg && NO_RESUBMIT.has(tg.status)) {
       return res.status(409).json({
         ok: false,
-        error: tg.status === "unknown"
-          ? "该平台提交结果待核验，不能直接重填。请先在任务详情里核验或打开平台确认"
-          : "该平台已发布或正在提交，已阻止重复执行",
+        error: NO_RESUBMIT_REASON(tg.status),
       });
     }
     const r = await rpa.refillTarget(req.params.groupId, req.params.accountId, task.snapshot);
@@ -1243,8 +1326,10 @@ logRoutes.registerLogRoutes(app);
  * 桌面版（electron/main.js）require 本文件时默认监听 3210；
  * 测试用 NOTEFLY_NO_LISTEN=1 只拿 app 实例，不起端口。 */
 function startServer(port) {
-  return app.listen(port || PORT, () => {
-    console.log(`Dispatch Hub 已启动: http://localhost:${port || PORT}`);
+  /* 显式绑定回环地址：app.listen 不传 host 时会监听全部网卡（含局域网），
+     本地接口没有鉴权，不能暴露给同网段其它设备（审查报告 P1 安全项） */
+  return app.listen(port || PORT, "127.0.0.1", () => {
+    console.log(`Dispatch Hub 已启动: http://127.0.0.1:${port || PORT}`);
   });
 }
 

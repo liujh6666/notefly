@@ -113,7 +113,7 @@ test("migrate：搬走数据文件与目录型数据", () => {
   assert.ok(fs.existsSync(path.join(from, "store.json")));
 });
 
-test("migrate：目标已存在同名目录时跳过，不覆盖", () => {
+test("migrate：目标已有数据时拒绝迁入（旧版「跳过」会造成稿件与素材错配，已改为拒绝）", () => {
   const from = path.join(TMP, "m3");
   const to = path.join(TMP, "m4");
   fs.mkdirSync(path.join(from, "uploads"), { recursive: true });
@@ -122,9 +122,9 @@ test("migrate：目标已存在同名目录时跳过，不覆盖", () => {
   fs.writeFileSync(path.join(to, "uploads", "new.png"), "new");
 
   const r = dataDir.migrate(from, to);
-  assert.equal(r.ok, true);
-  assert.ok(r.skipped.includes("uploads"));
-  assert.ok(!r.moved.includes("uploads"));
+  assert.equal(r.ok, false, "非空目标必须拒绝迁入");
+  assert.ok(r.conflicts.some((c) => String(c).startsWith("uploads")), "冲突清单要包含 uploads/");
+  /* 目标与源都必须原封不动 */
   assert.equal(fs.readFileSync(path.join(to, "uploads", "new.png"), "utf8"), "new");
   assert.ok(!fs.existsSync(path.join(to, "uploads", "old.png")));
 });

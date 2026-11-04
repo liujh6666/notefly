@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>NoteFly v1.1 · 多平台分发工作台</title>
+<title>NoteFly v1.7 · 多平台分发工作台</title>
 <link rel="icon" type="image/png" href="favicon.png" />
 <link rel="stylesheet" href="vendor/element-plus.css" />
 <link rel="stylesheet" href="vendor/ep-dark.css" />
@@ -54,7 +54,7 @@
           <span class="lamp" :class="{ ok: engineOk }"></span>
           <span>NoteFly RPA</span>
         </div>
-        <div class="side-ver">NOTEFLY v1.1</div>
+        <div class="side-ver">NOTEFLY v1.7</div>
       </div>
     </el-aside>
 
@@ -787,7 +787,7 @@
                   <el-icon class="set-ico"><info-filled /></el-icon>
                   <div class="grow">
                     <div class="strong">
-                      <span class="nf-version" :class="{ 'nf-version-tapped': logUnlockHint }" @click="tapVersion" title="连点 5 次可打开运行日志">NoteFly v1.1</span>
+                      <span class="nf-version" :class="{ 'nf-version-tapped': logUnlockHint }" @click="tapVersion" title="连点 5 次可打开运行日志">NoteFly v1.7</span>
                     </div>
                     <div class="muted">本地多平台内容分发工作台 · NoteFly · 数据全部存本机 data/ 目录</div>
                     <!-- 连点版本号 5 次后才出现的日志入口 -->
@@ -870,6 +870,9 @@
               </el-button>
               <el-button size="small" @click="openTextTool('humanize')" :disabled="!ceForm.body" title="去掉套话、模板句式与 AI 味表达">
                 <el-icon><Brush /></el-icon> 去 AI 味
+              </el-button>
+              <el-button v-if="bodyUndoStack.length" size="small" @click="undoBodyChange" title="恢复到上一次排版/去AI味之前的内容">
+                <el-icon><refresh-left /></el-icon> 撤销排版
               </el-button>
               <el-button size="small" type="primary" plain @click="openAiPanel()"
                 :class="{ 'is-ai-locked': !aiReady }"
@@ -2192,12 +2195,23 @@ const app = createApp({
       }
     }
 
+    /* 排版/去AI味撤销栈：应用前保存原文，改坏了可以一键恢复（审查 P0-1 要求可撤销） */
+    const bodyUndoStack = [];
+    function undoBodyChange() {
+      const prev = bodyUndoStack.pop();
+      if (prev == null) return;
+      state.ceForm.body = prev;
+      ElMessage.success("已恢复到上一次改动之前的内容");
+    }
+
     function applyTextTool() {
       if (!state.ttAfter) return;
       /* 只回写纯文本：标记用的 <mark> 绝不能进正文（会被当成正文内容发出去） */
+      bodyUndoStack.push(state.ceForm.body);
+      if (bodyUndoStack.length > 10) bodyUndoStack.shift();   // 只留最近 10 次
       state.ceForm.body = state.ttAfter;
       state.ttVisible = false;
-      ElMessage.success("已应用到正文，记得保存");
+      ElMessage.success("已应用到正文，记得保存（改坏了可点「撤销排版」恢复）");
     }
 
     /* 本地绝对路径 -> 网页可访问地址：上传的图片存的是磁盘路径，浏览器加载不了，
@@ -3311,6 +3325,7 @@ const app = createApp({
       aiModels, aiPreset, loadAiConfig, applyAiPreset, saveAiConfig, testAi, goAiSettings,
       applyKeySite, disconnectAi, backToAiSettings, closeKeyTip,
       aiLockedTip, onAiModeGate, onAiChip,
+      bodyUndoStack, undoBodyChange,
       tapVersion, openLogPanel, loadLogs, toggleLogAuto, stopLogAuto, clearLogs, copyLogText, exportLogFile, copyLogDir, openLogDir, logTime, logLevelText, logExtraText,
       openAiPanel, runAi, applyAiResult, fillToContent, copyAiResult, currentSelection,
       openTextTool, runTextTool, applyTextTool,

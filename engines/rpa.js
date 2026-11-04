@@ -750,21 +750,31 @@ function listPlatforms() {
 
 /* 填充发布（草稿模式）：逐平台开页填充，返回 targets 状态数组 */
 /* mode: "draft" = 只填内容存草稿（人工检查后手动发）；"publish" = 填完自动点平台发布按钮 */
-async function publish(snapshot, platforms, mode = "draft") {
+async function publish(snapshot, platforms, mode = "draft", opts = {}) {
   const groupId = "rpa-" + Date.now();
   const handles = [];
   const targets = [];
   const autoPublish = mode === "publish";
+  /* 逐目标进度回调：每确定一个平台的结果就通知调用方持久化
+     （服务端据此做逐目标落盘 —— 第二平台卡死时不丢第一阶段记录） */
+  const notify = () => {
+    const t = targets[targets.length - 1];
+    if (t && typeof opts.onProgress === "function") {
+      try { opts.onProgress(t.platform, t); } catch { /* 回调失败不影响发布 */ }
+    }
+  };
   for (const platform of platforms) {
     const adapter = ADAPTERS[platform];
     if (!adapter) {
       targets.push({ platform, accountId: platform, status: "failed", error: "无该平台适配器" });
       logger.error("发布引擎", `无该平台适配器：${platform}`);
+      notify();
       continue;
     }
     if (adapter.contentType !== snapshot.type) {
       targets.push({ platform, accountId: platform, status: "failed", error: `该平台不支持 ${snapshot.type}` });
       logger.error("发布引擎", `平台不支持该内容类型：${platform}（${snapshot.type}）`);
+      notify();
       continue;
     }
     try {
@@ -786,6 +796,7 @@ async function publish(snapshot, platforms, mode = "draft") {
             error: `「${adapter.label}」自动提交能力未验证，已停在草稿待确认，请在打开的页面人工发布`,
             capabilityLimited: true,
           });
+          notify();
           continue;
         }
         /* 立即发布：填完直接走平台自己的发布流程。
@@ -802,6 +813,7 @@ async function publish(snapshot, platforms, mode = "draft") {
         handles.push({ platform, page, state: "ready" });
         targets.push({ platform, accountId: platform, status: "ready" });
       }
+      notify();
     } catch (e) {
       const msg = String(e.message || e).slice(0, 300);
       /* 提交超时 ≠ 失败：请求可能已被平台接收，盲目重发会造成重复发文。
@@ -818,6 +830,7 @@ async function publish(snapshot, platforms, mode = "draft") {
         targets.push({ platform, accountId: platform, status: "failed", error: autoPublish ? "自动发布失败：" + msg : msg });
         logger.error("发布引擎", `填充/发布失败：${platform}`, { 错误: msg, 模式: autoPublish ? "直接发布" : "存草稿箱" });
       }
+      notify();
     }
   }
   activeTasks.set(groupId, handles);

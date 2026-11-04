@@ -60,7 +60,7 @@ npm start
 ## 开发
 
 ```bash
-npm test                 # 198 条单元/集成测试
+npm test                 # 214 条单元/集成测试
 npm run test:ui          # 54 项真实浏览器 UI 回归
 npm run test:ai          # 45 项 AI 与文本工具端到端
 npm run test:gzh         # 29 项公众号排版端到端
