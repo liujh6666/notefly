@@ -1,0 +1,3335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NoteFly v1.1 · 多平台分发工作台</title>
+<link rel="icon" type="image/png" href="favicon.png" />
+<link rel="stylesheet" href="vendor/element-plus.css" />
+<link rel="stylesheet" href="vendor/ep-dark.css" />
+  <link rel="stylesheet" href="fonts/puhuiti.css" />
+  <link rel="stylesheet" href="theme.css" />
+<script src="vendor/vue.global.prod.js"></script>
+<script src="vendor/element-plus.min.js"></script>
+<script src="vendor/zh-cn.min.js"></script>
+<script src="vendor/icons.iife.min.js"></script>
+<script src="vendor/marked.min.js"></script>
+<!-- 统一请求层与保存逻辑（纯函数，可在 Node 里回归测试） -->
+<script src="js/api-client.js"></script>
+<script src="js/content-save.js"></script>
+</head>
+<body>
+<div id="app">
+  <el-container class="layout">
+    <el-aside :width="sideW" class="sidebar" :class="{ rail: isRail }">
+      <div class="logo">
+        <img src="logo.png" class="logo-img" alt="NoteFly" />
+        <div class="logo-text">
+          <div class="logo-name">NoteFly</div>
+        </div>
+      </div>
+      <el-menu :default-active="page === 'editor' ? 'contents' : page" @select="onMenuSelect" class="side-menu">
+        <div class="nav-group">概览</div>
+        <el-menu-item index="dashboard"><el-icon><Odometer /></el-icon><span>工作台</span></el-menu-item>
+
+        <div class="nav-group">内容</div>
+        <el-menu-item index="contents"><el-icon><folder-opened /></el-icon><span>内容库</span></el-menu-item>
+        <el-menu-item index="media"><el-icon><Files /></el-icon><span>素材库</span></el-menu-item>
+
+        <div class="nav-group">分发</div>
+        <el-menu-item index="publish"><el-icon><Promotion /></el-icon><span>发布中心</span></el-menu-item>
+        <el-menu-item index="tasks"><el-icon><List /></el-icon><span>发布记录</span></el-menu-item>
+        <el-menu-item index="calendar"><el-icon><Calendar /></el-icon><span>发布日历</span></el-menu-item>
+
+        <div class="nav-group">洞察</div>
+        <el-menu-item index="metrics"><el-icon><trend-charts /></el-icon><span>数据看板</span></el-menu-item>
+
+        <div class="nav-group">系统</div>
+        <el-menu-item index="accounts"><el-icon><User /></el-icon><span>账号管理</span></el-menu-item>
+        <el-menu-item index="browser"><el-icon><Monitor /></el-icon><span>内置浏览器</span></el-menu-item>
+        <el-menu-item index="settings"><el-icon><Setting /></el-icon><span>设置</span></el-menu-item>
+      </el-menu>
+      <div class="side-foot">
+        <div class="side-engine">
+          <span class="lamp" :class="{ ok: engineOk }"></span>
+          <span>NoteFly RPA</span>
+        </div>
+        <div class="side-ver">NOTEFLY v1.1</div>
+      </div>
+    </el-aside>
+
+    <el-container>
+      <el-header class="topbar" height="72px">
+        <div class="topbar-left">
+          <div class="nf-eyebrow">{{ pageSection }}</div>
+          <div class="page-title">{{ pageTitle }}</div>
+        </div>
+        <div class="topbar-right">
+          <div class="page-desc">{{ pageDesc }}</div>
+          <div class="engine-chip" title="NoteFly RPA 引擎状态">
+            <span class="lamp" :class="{ ok: engineOk }"></span>
+            <span class="engine-chip-text">{{ engineText }}</span>
+          </div>
+          <div class="engine-chip engine-chip--click" @click="onAiChip"
+            :title="aiReady ? 'AI 已接入：点击查看模型配置' : 'AI 未接入：点击接入'">
+            <span class="lamp" :class="{ ok: aiReady }"></span>
+            <span class="engine-chip-text">{{ aiReady ? "AI 已接入" : "AI 未接入" }}</span>
+          </div>
+        </div>
+      </el-header>
+
+      <el-main class="main-area" :class="{ editing: page === 'editor' }">
+        <!-- 工作台 -->
+        <template v-if="page === 'dashboard'">
+          <div class="nf-enter nf-enter-1">
+            <div class="stat-grid">
+              <div class="stat-cell" v-for="s in statCards" :key="s.label">
+                <div class="nf-eyebrow">{{ s.eyebrow }}</div>
+                <div class="stat-num">{{ s.num }}</div>
+                <div class="stat-label">{{ s.label }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="dash-cols nf-enter nf-enter-2">
+            <el-card shadow="never">
+              <template #header>
+                <div class="card-head">
+                  <div>
+                    <div class="card-title">任务状态分布</div>
+                    <div class="card-sub">按归并后的真实状态统计</div>
+                  </div>
+                  <span class="nf-eyebrow">Status</span>
+                </div>
+              </template>
+              <el-empty v-if="!statusDist.length" description="暂无任务" :image-size="64"></el-empty>
+              <template v-else>
+                <div class="dist-bar" role="img" aria-label="任务状态分布">
+                  <div v-for="d in statusDist" :key="d.key" class="dist-seg"
+                    :style="{ flexGrow: d.count, background: d.color }"
+                    :title="d.label + ' ' + d.count"></div>
+                </div>
+                <div class="dist-legend">
+                  <div class="dist-item" v-for="d in statusDist" :key="d.key">
+                    <span class="dist-dot" :style="{ background: d.color }"></span>
+                    <span>{{ d.label }}</span>
+                    <b>{{ d.count }}</b>
+                  </div>
+                </div>
+              </template>
+            </el-card>
+
+            <el-card shadow="never">
+              <template #header>
+                <div class="card-head">
+                  <div>
+                  <div class="card-title">平台表现</div>
+                  <div class="card-sub">条长 = 发布量级 · 绿=成功 · 红=失败 · 灰=待确认</div>
+                  </div>
+                  <span class="nf-eyebrow">Platform</span>
+                </div>
+              </template>
+              <el-empty v-if="!platformRank.length" description="发布后自动生成" :image-size="64"></el-empty>
+              <div class="rank-row" v-for="p in platformRank" :key="p.key">
+                <div class="rank-name" :title="p.label">{{ p.label }}</div>
+                <div class="rank-track">
+                  <div class="rank-bar" :style="{ width: (p.ratio * 100).toFixed(1) + '%' }">
+                    <div class="rank-fill ok" :style="{ flexGrow: p.success || 0.001 }"></div>
+                    <div class="rank-fill bad" :style="{ flexGrow: p.failed || 0.001 }"></div>
+                    <div class="rank-fill other" :style="{ flexGrow: p.other || 0.001 }"></div>
+                  </div>
+                </div>
+                <div class="rank-val" :title="`成功 ${p.success} · 失败 ${p.failed} · 合计 ${p.total}`">
+                  <span class="ok">{{ p.success }}</span><span class="sep">/</span><span class="bad">{{ p.failed }}</span><span class="sep">/</span><span class="dim">{{ p.total }}</span>
+                </div>
+              </div>
+            </el-card>
+          </div>
+
+          <el-card shadow="never" class="nf-enter nf-enter-3">
+            <template #header>
+              <div class="card-head">
+                <div>
+                  <div class="card-title">最近任务</div>
+                  <div class="card-sub">最近 5 条发布执行记录</div>
+                </div>
+                <el-button size="small" text @click="onMenuSelect('tasks')">查看全部 →</el-button>
+              </div>
+            </template>
+            <task-table :tasks="tasks.slice(0, 5)" with-actions @view="viewTask" />
+          </el-card>
+        </template>
+
+        <!-- 发布中心 -->
+        <template v-if="page === 'publish'">
+          <div class="pub-steps nf-enter nf-enter-1">
+            <div class="pub-step" :class="{ active: pubStep === 1, done: pubStep > 1 }">
+              <div class="pub-step-num">1</div>
+              <div>
+                <div class="pub-step-title">选择内容</div>
+                <div class="pub-step-desc">{{ pubContent ? pubContent.title : "从内容库挑一篇稿件" }}</div>
+              </div>
+            </div>
+            <div class="pub-step" :class="{ active: pubStep === 2, done: pubStep > 2 }">
+              <div class="pub-step-num">2</div>
+              <div>
+                <div class="pub-step-title">选择账号</div>
+                <div class="pub-step-desc">已选 {{ pubAccounts.length }} 个平台</div>
+              </div>
+            </div>
+            <div class="pub-step" :class="{ active: pubStep === 3 }">
+              <div class="pub-step-num">3</div>
+              <div>
+                <div class="pub-step-title">发布设置</div>
+                <div class="pub-step-desc">{{ pubMode === "publish" ? "立即发布" : "发布到草稿箱" }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pub-grid nf-enter nf-enter-2">
+            <div class="pub-main">
+              <el-card shadow="never" class="mb16">
+                <template #header>
+                  <div class="card-head">
+                    <div>
+                      <div class="card-title">① 选择内容</div>
+                      <div class="card-sub">要分发到各平台的稿件</div>
+                    </div>
+                  </div>
+                </template>
+                <el-select v-model="pubContentId" placeholder="从内容库选择（先到内容库新建）" style="width: 100%; max-width: 460px">
+                  <el-option v-for="c in contents" :key="c.id" :label="(c.draft ? '[草稿] ' : '') + c.title + '（' + typeLabel(c.type) + '）'" :value="c.id"></el-option>
+                </el-select>
+                <div class="pub-content-preview" v-if="pubContent">
+                  <div class="pub-content-title">{{ pubContent.title }}</div>
+                  <div class="pub-content-body">{{ (pubContent.body || "").slice(0, 160) }}{{ (pubContent.body || "").length > 160 ? "…" : "" }}</div>
+                  <div class="nf-dim mt8">{{ typeLabel(pubContent.type) }} · 正文 {{ (pubContent.body || "").length }} 字</div>
+                </div>
+                <el-empty v-else description="还没有选择内容" :image-size="60"></el-empty>
+              </el-card>
+
+              <el-card shadow="never">
+                <template #header>
+                  <div class="card-head">
+                    <div>
+                      <div class="card-title">② 选择账号</div>
+                      <div class="card-sub">只显示已登录的平台 · 勾选要发布到的账号</div>
+                    </div>
+                    <span class="nf-eyebrow">{{ pubAccounts.length }} / {{ pubAccountOptions.length }}</span>
+                  </div>
+                </template>
+                <el-table :data="pubAccountOptions" @selection-change="(rows) => (pubAccounts = rows)" empty-text="还没有已登录的账号 —— 请到「账号管理」登录平台后再来勾选">
+                  <el-table-column type="selection" width="46" :selectable="(r) => engine === 'rpa' || isLoggedAny(r)"></el-table-column>
+                  <el-table-column label="账号" min-width="200">
+                    <template #default="{ row }">
+                      <div class="acct-cell">
+                        <el-avatar :size="34" :src="row.avatar">{{ (row.alias || row.displayName || "?")[0] }}</el-avatar>
+                        <div>
+                          <div class="strong">{{ row.alias || row.displayName || row.username }}</div>
+                          <div class="nf-dim">{{ row.platform }}</div>
+                        </div>
+                      </div>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="分组" prop="group" width="140"></el-table-column>
+                  <el-table-column label="登录态" width="120">
+                    <template #default="{ row }">
+                      <el-tag :type="loginTag(row)" size="small">{{ loginText(row) }}</el-tag>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </el-card>
+            </div>
+
+            <aside class="pub-side">
+              <el-card shadow="never">
+                <template #header>
+                  <div class="card-head">
+                    <div>
+                      <div class="card-title">③ 发布设置</div>
+                      <div class="card-sub">决定这次任务怎么执行</div>
+                    </div>
+                  </div>
+                </template>
+                <el-form label-position="top">
+                  <el-form-item label="发布方式">
+                    <div class="mode-picker">
+                      <div class="mode-opt" :class="{ on: pubMode === 'draft' }" role="radio"
+                        :aria-checked="pubMode === 'draft'" tabindex="0" @click="pubMode = 'draft'"
+                        @keydown.enter.prevent="pubMode = 'draft'" @keydown.space.prevent="pubMode = 'draft'">
+                        <div class="mode-opt-title">发布到草稿箱</div>
+                        <div class="mode-opt-desc">填进各平台编辑器并存为草稿，你检查后再手动发布</div>
+                      </div>
+                      <div class="mode-opt" :class="{ on: pubMode === 'publish' }" role="radio"
+                        :aria-checked="pubMode === 'publish'" tabindex="0" @click="pubMode = 'publish'"
+                        @keydown.enter.prevent="pubMode = 'publish'" @keydown.space.prevent="pubMode = 'publish'">
+                        <div class="mode-opt-title">立即发布</div>
+                        <div class="mode-opt-desc">自动点平台的发布按钮，内容直接对外公开</div>
+                      </div>
+                    </div>
+                  </el-form-item>
+                  <el-form-item label="定时发布">
+                    <el-date-picker v-model="pubTime" type="datetime" placeholder="留空 = 立即执行"
+                      format="YYYY-MM-DD HH:mm" style="width: 100%"></el-date-picker>
+                  </el-form-item>
+                  <el-form-item label="本次任务">
+                    <div class="pub-summary">
+                      <div class="sum-row">
+                        <span class="sum-key">内容</span>
+                        <span class="sum-val">{{ pubContent ? pubContent.title : "未选择" }}</span>
+                      </div>
+                      <div class="sum-row">
+                        <span class="sum-key">目标平台</span>
+                        <span class="sum-val mono">{{ pubAccounts.length ? pubAccounts.length + " 个" : "未选择" }}</span>
+                      </div>
+                      <div class="sum-row">
+                        <span class="sum-key">执行方式</span>
+                        <span class="sum-val">{{ pubMode === "publish" ? "立即发布" : "存为草稿" }}</span>
+                      </div>
+                      <div class="sum-row">
+                        <span class="sum-key">执行时间</span>
+                        <span class="sum-val mono">{{ pubTime ? fmt(pubTime) : "立即" }}</span>
+                      </div>
+                    </div>
+                  </el-form-item>
+                  <el-alert :type="pubMode === 'publish' ? 'warning' : 'info'" :closable="false" show-icon
+                    :title="pubMode === 'publish' ? '立即发布会自动完成平台侧的发布操作，内容将直接公开，请确认标题与正文无误。' : '草稿模式最安全：内容只进平台草稿箱，你在发布记录里逐个平台检查后手动发布。'"></el-alert>
+                  <div class="pub-actions">
+                    <el-button type="primary" :loading="pubBusy" @click="doPublish(false)">{{ pubMode === "publish" ? "立即发布" : "发布到草稿箱" }}</el-button>
+                    <el-button :disabled="pubBusy" @click="doPublish(true)">加入定时队列</el-button>
+                  </div>
+                </el-form>
+              </el-card>
+            </aside>
+          </div>
+        </template>
+
+        <!-- 内容库 -->
+        <template v-if="page === 'contents'">
+          <div class="page-head nf-enter nf-enter-1">
+            <div>
+              <div class="page-head-desc">共 {{ contents.length }} 篇稿件 · Markdown 写作，一键分发到各平台</div>
+            </div>
+            <div class="nf-row">
+              <el-dropdown split-button type="primary" @click="openContentEditor()" @command="onNewContentMode">
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="normal">普通文章</el-dropdown-item>
+                    <el-dropdown-item command="wechat">微信公众号文章（选模板）</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+                ＋ 新建内容
+              </el-dropdown>
+              <el-button @click="$refs.mdInput.click()">导入 .md 文件</el-button>
+              <input ref="mdInput" type="file" accept=".md,.markdown,.txt" style="display:none" @change="importMd" />
+            </div>
+          </div>
+          <el-card shadow="never" class="nf-enter nf-enter-2">
+            <el-table :data="contents" empty-text="内容库为空，点上方按钮新建第一篇">
+              <el-table-column label="标题" min-width="240" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <div class="content-title-cell">{{ row.title || "（未命名）" }} <el-tag v-if="row.draft" size="small" type="info" effect="plain">草稿</el-tag></div>
+                </template>
+              </el-table-column>
+              <el-table-column label="类型" width="110"><template #default="{ row }"><el-tag size="small" effect="plain">{{ typeLabel(row.type) }}</el-tag></template></el-table-column>
+              <el-table-column label="形态" width="150"><template #default="{ row }">
+                <el-tag v-if="row.gzhTheme" size="small" type="warning" effect="plain">{{ gzhThemeName(row.gzhTheme) }}</el-tag>
+                <span v-else class="muted">普通文章</span>
+              </template></el-table-column>
+              <el-table-column label="标签" min-width="150"><template #default="{ row }"><span class="muted">{{ (row.tags || []).join("、") || "—" }}</span></template></el-table-column>
+              <el-table-column label="字数" width="90"><template #default="{ row }"><span class="nf-num nf-dim">{{ (row.body || "").length }}</span></template></el-table-column>
+              <el-table-column label="创建时间" width="170"><template #default="{ row }"><span class="muted">{{ fmt(row.createdAt) }}</span></template></el-table-column>
+              <el-table-column label="操作" width="160" align="right">
+                <template #default="{ row }">
+                  <el-button size="small" @click="openContentEditor(row.id)">编辑</el-button>
+                  <el-button size="small" type="danger" plain @click="delContent(row.id)">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+        </template>
+
+        <!-- 素材库 -->
+        <template v-if="page === 'media'">
+          <div class="page-head nf-enter nf-enter-1">
+            <div>
+              <div class="page-head-desc">图片 / 视频 / 音频统一管理，路径可直接填进内容库或发布</div>
+            </div>
+            <el-button type="primary" @click="$refs.mediaInput.click()">上传素材</el-button>
+            <input ref="mediaInput" type="file" accept="image/*,video/*,audio/*" multiple style="display:none" @change="uploadMedia" />
+          </div>
+          <el-row :gutter="16" v-if="mediaFiles.length" class="nf-enter nf-enter-2">
+            <el-col :span="6" v-for="f in mediaFiles" :key="f.name" class="mb16">
+              <el-card shadow="never" body-style="padding:12px">
+                <div class="media-thumb">
+                  <img v-if="f.isImage" :src="f.url" @error="$event.target.style.display='none'" />
+                  <el-icon v-else-if="f.isVideo" :size="36"><video-play /></el-icon>
+                  <el-icon v-else :size="36"><Headset /></el-icon>
+                </div>
+                <div class="strong media-name" :title="f.name">{{ f.name }}</div>
+                <div class="nf-dim nf-num">{{ (f.size / 1024).toFixed(0) }} KB · {{ fmt(f.mtime) }}</div>
+                <div class="media-actions">
+                  <el-button size="small" @click="copyMediaPath(f)">复制路径</el-button>
+                  <el-button size="small" type="danger" plain @click="delMedia(f)">删除</el-button>
+                </div>
+              </el-card>
+            </el-col>
+          </el-row>
+          <el-empty v-else description="素材库为空，点上方按钮上传（发布时各平台从本机路径读取文件）"></el-empty>
+        </template>
+
+        <!-- 发布日历 -->
+        <template v-if="page === 'calendar'">
+          <el-card shadow="never">
+            <template #header>
+              <div style="display:flex; align-items:center; gap:12px">
+                <el-button size="small" @click="calShift(-1)">← 上月</el-button>
+                <span class="strong">{{ calYear }} 年 {{ calMonth }} 月</span>
+                <el-button size="small" @click="calShift(1)">下月 →</el-button>
+                <el-button size="small" @click="calToday">今天</el-button>
+                <span class="muted" style="margin-left:auto">显示定时任务与发布任务按天分布</span>
+              </div>
+            </template>
+            <div class="cal-grid">
+              <div class="cal-head" v-for="d in ['一','二','三','四','五','六','日']" :key="d">{{ d }}</div>
+              <div v-for="(cell, i) in calDays" :key="i" class="cal-cell" :class="{ blank: !cell.day, today: cell.isToday }">
+                <template v-if="cell.day">
+                  <div class="cal-day">{{ cell.day }}</div>
+                  <div v-for="t in cell.tasks" :key="t.id" class="cal-task" :class="t.status" @click="viewTask(t.id)" :title="t.title">
+                    {{ t.title }}
+                  </div>
+                </template>
+              </div>
+            </div>
+          </el-card>
+        </template>
+
+        <!-- 数据看板 -->
+        <template v-if="page === 'metrics'">
+          <div class="page-head nf-enter nf-enter-1">
+            <div>
+              <div class="page-head-desc">各平台阅读 / 点赞 / 评论 / 转发数据汇总</div>
+            </div>
+          </div>
+          <el-alert type="info" :closable="false" class="mb16 nf-enter nf-enter-2"
+            title="本地版说明：各平台阅读/互动数据需平台开放接口才能自动拉取（蚁小二为云端代拉）。本地版在任务详情里手动登记数据，这里自动聚合。"></el-alert>
+          <div class="stat-grid nf-enter nf-enter-2">
+            <div class="stat-cell" v-for="s in metricCards" :key="s.label">
+              <div class="nf-eyebrow">{{ s.eyebrow }}</div>
+              <div class="stat-num">{{ s.num }}</div>
+              <div class="stat-label">{{ s.label }}</div>
+            </div>
+          </div>
+          <el-card shadow="never" class="mt16 nf-enter nf-enter-3">
+            <template #header>
+              <div class="card-head">
+                <div>
+                  <div class="card-title">平台明细</div>
+                  <div class="card-sub">数据来自「发布记录」中的任务详情登记</div>
+                </div>
+                <span class="nf-eyebrow">Breakdown</span>
+              </div>
+            </template>
+            <el-table :data="metricsSummary" empty-text="暂无数据：在「发布记录」打开已完成任务，登记各平台数据">
+              <el-table-column prop="platform" label="平台" width="140"></el-table-column>
+              <el-table-column prop="reads" label="阅读/播放" sortable></el-table-column>
+              <el-table-column prop="likes" label="点赞" sortable></el-table-column>
+              <el-table-column prop="comments" label="评论" sortable></el-table-column>
+              <el-table-column prop="shares" label="转发/分享" sortable></el-table-column>
+              <el-table-column prop="entries" label="登记条数" width="100"></el-table-column>
+            </el-table>
+          </el-card>
+        </template>
+
+        <!-- 账号管理：列表只显示登录成功的平台；未登录的去「登录账号」弹窗里挑平台 -->
+        <template v-if="page === 'accounts'">
+          <div class="page-head nf-enter nf-enter-1">
+            <div>
+              <div class="page-head-desc">
+                {{ acctOnline }} 个账号确认在线<span v-if="acctStale"> · {{ acctStale }} 个待复核</span> · 共 {{ acctTotal }} 个平台可接入
+              </div>
+            </div>
+            <div class="nf-row">
+              <el-button :loading="checkAllBusy" @click="checkAllLogins">检查登录</el-button>
+              <el-button v-if="engine === 'rpa'" type="primary" @click="loginPickerVisible = true">登录账号<el-icon class="el-icon--right"><arrow-down /></el-icon></el-button>
+            </div>
+          </div>
+          <el-alert
+            v-if="accountsOutdated || acctStale"
+            class="mb16"
+            type="warning"
+            show-icon
+            :closable="false"
+            :title="accountsOutdated
+              ? ('登录判定规则已升级，' + accountsOutdated + ' 条旧的检查结果已作废（避免把没登录的算成已登录）')
+              : ('有 ' + acctStale + ' 个账号的登录态是上次巡检的旧结果，已经不能确定现在是否还登着')"
+            description="点「检查登录」重新逐个确认一遍，确认完只会留下真正登录成功的账号。"
+          >
+            <template #default>
+              <el-button size="small" type="warning" plain :loading="checkAllBusy" @click="checkAllLogins">立即重新检查</el-button>
+            </template>
+          </el-alert>
+          <el-card shadow="never" class="nf-enter nf-enter-2">
+            <div class="acct-toolbar mb16">
+              <el-input v-model="acctSearch" placeholder="搜索平台 / 别名" prefix-icon="Search" clearable style="width: 240px"></el-input>
+              <div class="grow"></div>
+              <span class="nf-dim">确认在线 {{ acctOnline }}<span v-if="acctStale"> · 待复核 {{ acctStale }}</span> / 共 {{ accounts.length }} 个平台</span>
+            </div>
+            <el-table :data="filteredAccounts" style="width: 100%" empty-text="还没有登录成功的账号 —— 点右上角「登录账号」选择平台开始登录">
+              <el-table-column label="账号信息" min-width="260">
+                <template #default="{ row }">
+                  <div class="acct-cell">
+                    <el-avatar :size="36" :src="row.avatar">{{ (row.alias || row.displayName || "?")[0] }}</el-avatar>
+                    <div>
+                      <div class="strong">
+                        {{ row.alias || row.displayName || row.username }}
+                        <el-tag size="small" :type="loginTag(row)">
+                          {{ loginText(row) }}
+                        </el-tag>
+                        <el-tag v-if="row.adapterStatus === 'unverified'" size="small" type="warning">适配器待验证</el-tag>
+                      </div>
+                      <div class="muted" style="font-size:12px">{{ checkHint(row) }}</div>
+                    </div>
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="平台" width="170">
+                <template #default="{ row }">
+                  <div class="acct-cell">
+                    <span class="plat-dot" :class="loginDot(row)"
+                      :title="loginText(row)"></span>
+                    {{ row.displayName }}
+                  </div>
+                </template>
+              </el-table-column>
+              <el-table-column label="分组" width="190">
+                <template #default="{ row }">
+                  <el-select :model-value="row.group" filterable allow-create default-first-option size="small" style="width: 160px" @change="(v) => saveGroup(row, v)">
+                    <el-option v-for="g in groupOptions" :key="g" :label="g" :value="g"></el-option>
+                  </el-select>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="240" align="right">
+                <template #default="{ row }">
+                  <template v-if="engine === 'rpa'">
+                    <el-button link type="primary" size="small" @click="startLogin(row)">登录</el-button>
+                    <el-button link size="small" @click="rpaCheck(row.id)">检查</el-button>
+                  </template>
+                  <el-button v-else link type="primary" size="small" @click="refreshAccount(row.id)">刷新登录态</el-button>
+                  <el-button link size="small" @click="openAccountMeta(row)">设置</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+
+          <!-- 登录平台选择弹窗：列出全部可接入平台，点卡片进入内置浏览器登录 -->
+          <el-dialog v-model="loginPickerVisible" title="选择要登录的平台" width="820px" class="nf-dialog">
+            <div class="login-picker-lead">
+              选一个平台后会在内置浏览器打开它的登录页。完成扫码/账号登录后点「完成登录」，
+              系统自动检查登录信息，检查通过会关掉页面回到账号管理。
+            </div>
+            <div class="login-grid">
+              <div v-for="a in accounts" :key="a.id" class="login-card" @click="pickLoginPlatform(a)">
+                <span class="plat-dot" :class="loginDot(a)"
+                  :title="loginText(a)"></span>
+                <span class="login-card-name">{{ a.displayName }}</span>
+                <el-tag size="small" :type="loginTag(a)" effect="plain">
+                  {{ loginText(a) }}
+                </el-tag>
+              </div>
+            </div>
+            <template #footer>
+              <el-button @click="loginPickerVisible = false">取消</el-button>
+            </template>
+          </el-dialog>
+        </template>
+
+        <!-- 内置浏览器（Electron 桌面版） -->
+        <template v-if="page === 'browser'">
+          <el-card shadow="never" class="b-card">
+            <div v-if="loginCtx" class="b-login-bar">
+              <div class="b-login-txt">
+                <el-icon><Lock /></el-icon>
+                <span>正在登录 <b>{{ loginCtx.label }}</b> —— 在下方页面完成扫码/账号登录，然后点「完成登录」把登录态同步给发布引擎</span>
+              </div>
+              <div class="b-login-btns">
+                <el-button size="small" type="primary" :loading="loginBusy" @click="finishLogin">完成登录</el-button>
+                <el-button size="small" :disabled="loginBusy" @click="cancelLogin">取消</el-button>
+              </div>
+            </div>
+            <div v-if="keyCtx" class="b-login-bar b-key-bar">
+              <div class="b-login-txt">
+                <el-icon><Key /></el-icon>
+                <span>正在 <b>{{ keyCtx.name }}</b> 的 API Key 申请页 —— 在下方页面完成登录与创建，拿到 Key 后回「设置 → AI 模型」粘贴</span>
+              </div>
+              <div class="b-login-btns">
+                <el-button size="small" type="primary" @click="backToAiSettings">返回设置填写 Key</el-button>
+                <el-button size="small" @click="closeKeyTip">关闭提示</el-button>
+              </div>
+            </div>
+            <div class="b-bar">
+              <el-button size="small" @click="bBack" title="后退">←</el-button>
+              <el-button size="small" @click="bHome" title="首页">⌂</el-button>
+              <el-input v-model="bUrl" placeholder="输入网址，回车打开" clearable @keyup.enter="bGo"></el-input>
+              <el-button type="primary" size="small" @click="bGo">打开</el-button>
+            </div>
+            <div class="b-links">
+              <el-tag class="b-link b-link-new" effect="plain" @click="bNewPage">＋ 新建页面</el-tag>
+              <el-tag v-for="s in bShortcuts" :key="s.url" class="b-link" effect="plain" @click="bOpen(s.url)">{{ s.label }}</el-tag>
+              <span v-if="!bShortcuts.length" class="muted" style="font-size:12px">还没有已登录的平台 —— 到「账号管理 → 登录账号」登录后，平台首页会出现在这里。</span>
+              <span v-else class="muted" style="font-size:12px">上面是你已登录的平台，点击直接打开；或用「新建页面」输入任意网址。</span>
+            </div>
+            <div class="b-view-wrap">
+              <webview v-if="isElectron" id="bWeb" :src="bUrl" partition="persist:notefly" allowpopups style="width: 100%; height: 100%;"></webview>
+              <el-empty v-else description="内置浏览器是桌面版专属功能 —— 在 Electron 桌面窗口中打开 NoteFly 即可使用（双击「启动NoteFly桌面版.bat」）"></el-empty>
+            </div>
+          </el-card>
+        </template>
+
+        <!-- 发布记录 -->
+        <template v-if="page === 'tasks'">
+          <div class="page-head nf-enter nf-enter-1">
+            <div>
+              <div class="page-head-desc">共 {{ tasks.length }} 条执行记录 · 可逐平台提交、重试与登记数据</div>
+            </div>
+          </div>
+          <el-card shadow="never" class="nf-enter nf-enter-2">
+            <task-table :tasks="tasks" with-actions @view="viewTask" />
+          </el-card>
+        </template>
+
+        <!-- 设置（分组卡片 + 开关/下拉） -->
+        <template v-if="page === 'settings'">
+          <div class="settings-wrap nf-enter nf-enter-1">
+            <div class="page-head">
+              <div class="page-head-desc">
+                执行引擎：NoteFly RPA · 轮询间隔：{{ cfg.checkInterval }} ·
+                主题：{{ themeDark ? "深色" : "浅色" }}
+              </div>
+            </div>
+
+            <div class="set-group" id="set-ai"><div class="set-group-name">AI 模型</div>
+              <el-card shadow="never">
+                <div class="ai-cfg-intro">
+                  <el-icon class="set-ico"><Cpu /></el-icon>
+                  <div class="grow">
+                    <div class="strong">接入大模型，用于写稿、续写、润色与深度去 AI 味</div>
+                    <div class="muted">填任意 <b>OpenAI 兼容接口</b> 即可：DeepSeek、通义千问、Kimi、智谱、硅基流动、OpenAI 官方，或本机 Ollama。API Key 只写进本机 <code>data/config.json</code>，不会回传页面、不随源码包外发。</div>
+                  </div>
+                </div>
+
+                <div class="ai-cfg-grid">
+                  <div class="ai-cfg-item">
+                    <label>服务预设</label>
+                    <el-select v-model="aiCfg.preset" style="width: 100%" @change="applyAiPreset">
+                      <el-option v-for="p in aiPresets" :key="p.id" :label="p.name" :value="p.id"></el-option>
+                    </el-select>
+                  </div>
+                  <div class="ai-cfg-item">
+                    <label>服务地址 Base URL</label>
+                    <el-input v-model="aiCfg.baseUrl" placeholder="https://api.deepseek.com/v1"></el-input>
+                  </div>
+                  <div class="ai-cfg-item">
+                    <label>API Key</label>
+                    <el-input v-model="aiCfg.apiKey" type="password" show-password placeholder="本地 Ollama 可留空"></el-input>
+                    <div class="muted" style="font-size: 11.5px; margin-top: 4px" v-if="aiCfg.keyMasked">已保存：{{ aiCfg.keyMasked }}（留空则不改动）</div>
+                  </div>
+                  <div class="ai-cfg-item">
+                    <label>模型名</label>
+                    <el-select v-model="aiCfg.model" filterable allow-create default-first-option style="width: 100%" placeholder="选择或直接输入模型名">
+                      <el-option v-for="m in aiModels" :key="m" :label="m" :value="m"></el-option>
+                    </el-select>
+                  </div>
+                  <div class="ai-cfg-item">
+                    <label>温度</label>
+                    <el-slider v-model="aiCfg.temperature" :min="0" :max="2" :step="0.1" show-input />
+                    <div class="muted" style="font-size: 11.5px">越高越发散，写正文建议 0.6–0.8</div>
+                  </div>
+                  <div class="ai-cfg-item">
+                    <label>最大输出 token</label>
+                    <el-input-number v-model="aiCfg.maxTokens" :min="256" :max="32768" :step="256" controls-position="right" style="width: 100%" />
+                  </div>
+                  <div class="ai-cfg-item">
+                    <label>超时（秒）</label>
+                    <el-input-number v-model="aiCfg.timeoutSec" :min="10" :max="600" :step="10" controls-position="right" style="width: 100%" />
+                  </div>
+                </div>
+
+                <div class="ai-cfg-actions">
+                  <el-button size="small" :loading="aiTestBusy" @click="testAi">测试连接</el-button>
+                  <el-button size="small" type="primary" :loading="aiSaveBusy" @click="saveAiConfig">保存配置</el-button>
+                  <el-button size="small" @click="applyKeySite" :disabled="!aiPreset.keyUrl"
+                    :title="aiPreset.keyUrl ? ('在内置浏览器打开' + aiPreset.name + '的 API Key 申请页') : (aiPreset.name + ' 不需要申请 Key')">
+                    申请 Key
+                  </el-button>
+                  <el-button size="small" type="danger" plain
+                    :disabled="!aiCfg.connected && !aiCfg.ready && !aiCfg.keyMasked" @click="disconnectAi"
+                    title="清除已保存的 Key 与服务地址，AI 功能回到未接入状态">断开 AI</el-button>
+                  <span class="muted" style="font-size: 12px" v-if="aiCfg.connected">已接入：{{ aiCfg.model }}</span>
+                  <span class="muted" style="font-size: 12px" v-else-if="aiCfg.ready">配置已填好，还差 API Key</span>
+                  <span class="muted" style="font-size: 12px" v-else>填完地址与模型名才能用 AI 功能</span>
+                </div>
+                <div class="ai-key-hint" v-if="aiPreset.keyNote">
+                  <el-icon><info-filled /></el-icon>
+                  <span>{{ aiPreset.name }}：{{ aiPreset.keyNote }}</span>
+                </div>
+              </el-card>
+            </div>
+
+            <div class="set-group"><div class="set-group-name">通用设置</div>
+              <el-card shadow="never">
+                <div class="set-row">
+                  <el-icon class="set-ico"><Moon /></el-icon>
+                  <div class="grow"><div class="strong">深色模式</div><div class="muted">全局切换深色主题，刷新后仍保持</div></div>
+                  <el-switch v-model="themeDark" @change="toggleTheme"></el-switch>
+                </div>
+                <div class="set-row">
+                  <el-icon class="set-ico"><switch-button /></el-icon>
+                  <div class="grow"><div class="strong">关闭所有浏览器窗口</div><div class="muted">一键关闭 RPA 引擎打开的所有平台页面</div></div>
+                  <el-button size="small" @click="closeAllWindows">关闭</el-button>
+                </div>
+                <div class="set-row">
+                  <el-icon class="set-ico"><Delete /></el-icon>
+                  <div class="grow"><div class="strong">清理浏览器缓存</div><div class="muted">清空 RPA 浏览器登录态（所有平台需重新扫码登录）</div></div>
+                  <el-button size="small" type="danger" plain @click="clearProfile">清理</el-button>
+                </div>
+                <div class="set-row">
+                  <el-icon class="set-ico"><Timer /></el-icon>
+                  <div class="grow"><div class="strong">定时任务检查间隔</div><div class="muted">调度器每 N 秒检查一次定时发布队列，最小 5 秒</div></div>
+                  <el-select v-model="cfg.checkInterval" style="width: 140px" @change="saveInterval">
+                    <el-option v-for="n in [10, 30, 60, 300]" :key="n" :label="n >= 60 ? (n/60) + ' 分钟' : n + ' 秒'" :value="n"></el-option>
+                  </el-select>
+                </div>
+              </el-card>
+            </div>
+
+            <div class="set-group"><div class="set-group-name">账号保活</div>
+              <el-card shadow="never">
+                <div class="set-row">
+                  <el-icon class="set-ico"><Avatar /></el-icon>
+                  <div class="grow"><div class="strong">自动保持账号在线</div><div class="muted">定期在后台巡检各平台刷新登录状态，掉线时会提醒你（下次执行约 {{ ka.intervalHours }} 小时后）</div></div>
+                  <el-switch v-model="ka.enabled" @change="saveKeepalive"></el-switch>
+                </div>
+                <div class="set-row">
+                  <el-icon class="set-ico"><Clock /></el-icon>
+                  <div class="grow"><div class="strong">保活间隔</div><div class="muted">实际执行时间会在所选间隔上下随机浮动，更接近真人使用习惯</div></div>
+                  <el-select v-model="ka.intervalHours" style="width: 140px" @change="saveKeepalive">
+                    <el-option v-for="h in [1, 2, 4, 8, 12, 24]" :key="h" :label="'每 ' + h + ' 小时'" :value="h"></el-option>
+                  </el-select>
+                </div>
+                <div class="set-row">
+                  <el-icon class="set-ico"><Refresh /></el-icon>
+                  <div class="grow"><div class="strong">立即执行一轮</div><div class="muted">{{ ka.lastRun ? '上次执行 ' + fmt(ka.lastRun) + ' · ' + ka.lastOnline + ' 个在线（共 ' + ka.lastTotal + '）' : '尚未执行过巡检' }}</div></div>
+                  <el-button size="small" :loading="kaBusy" @click="runKeepaliveNow">立即执行</el-button>
+                </div>
+              </el-card>
+            </div>
+
+            <div class="set-group"><div class="set-group-name">发布设置</div>
+              <el-card shadow="never">
+                <div class="set-row">
+                  <el-icon class="set-ico"><Lock /></el-icon>
+                  <div class="grow"><div class="strong">默认草稿箱模式</div><div class="muted">新建任务默认把内容填进各平台草稿箱，由你逐个确认；发布中心可对单次任务选「立即发布」。自动提交按平台逐项验证：草稿能力通过不等于自动提交能力通过，未验证的平台会停在草稿待确认，由你在平台页面人工发布</div></div>
+                  <el-tag size="small" type="info" effect="plain">默认开启</el-tag>
+                </div>
+                <div class="set-row">
+                  <el-icon class="set-ico"><Connection /></el-icon>
+                  <div class="grow"><div class="strong">执行引擎</div><div class="muted">NoteFly RPA：本软件内置浏览器自动填稿，零额外安装</div></div>
+                  <el-tag size="small" type="info" effect="plain">RPA（内置）</el-tag>
+                </div>
+                <div class="set-row">
+                  <el-icon class="set-ico"><Bell /></el-icon>
+                  <div class="grow"><div class="strong">发布前违禁词检测</div><div class="muted">命中广告法/平台风控词时弹窗提醒，可强制继续</div></div>
+                  <el-switch v-model="checkWordsOnPublish"></el-switch>
+                </div>
+              </el-card>
+            </div>
+
+            <div class="set-group"><div class="set-group-name">外部 API</div>
+              <el-card shadow="never">
+                <div class="set-row" style="align-items:flex-start">
+                  <el-icon class="set-ico"><Connection /></el-icon>
+                  <div class="grow">
+                    <div class="strong">开放本地 API</div>
+                    <div class="muted">NoteFly 所有功能均可通过本机 HTTP API 调用，可接入其他 AI 工具或脚本</div>
+                    <div class="api-addr"><code>http://localhost:3210</code><el-button size="small" text @click="copyApiAddr">复制</el-button></div>
+                  </div>
+                </div>
+              </el-card>
+            </div>
+
+            <div class="set-group"><div class="set-group-name">数据存储</div>
+              <el-card shadow="never">
+                <div class="set-row" style="align-items:flex-start">
+                  <el-icon class="set-ico"><folder-opened /></el-icon>
+                  <div class="grow">
+                    <div class="strong">数据存放位置</div>
+                    <div class="muted">内容库、发布记录、账号登录态、上传素材与 AI 配置都存在这个目录里。换目录会把现有数据一并搬过去，原目录的数据保留不动。</div>
+                    <div class="data-dir-path">
+                      <code>{{ cfg.dataDir || "—" }}</code>
+                      <el-tag v-if="cfg.dataDirIsDefault" size="small" type="info" effect="plain">默认位置</el-tag>
+                      <el-tag v-else size="small" type="warning" effect="plain">自定义位置</el-tag>
+                    </div>
+                    <div class="data-dir-actions">
+                      <el-input v-model="dataDirInput" size="small" placeholder="填写新的存放目录，例如 D:\NoteFlyData" style="max-width: 380px"></el-input>
+                      <el-button size="small" type="primary" :loading="dataDirBusy" :disabled="!dataDirInput.trim()" @click="switchDataDir">切换并迁移</el-button>
+                      <el-button size="small" :loading="dataDirBusy" :disabled="cfg.dataDirIsDefault" @click="resetDataDir">恢复默认位置</el-button>
+                    </div>
+                    <div class="muted" style="font-size: 12px; margin-top: 6px">切换后需要重启 NoteFly 才会完全生效；桌面版会提示你重启。</div>
+                  </div>
+                </div>
+              </el-card>
+            </div>
+
+            <div class="set-group"><div class="set-group-name">关于</div>
+              <el-card shadow="never">
+                <div class="set-row">
+                  <el-icon class="set-ico"><info-filled /></el-icon>
+                  <div class="grow">
+                    <div class="strong">
+                      <span class="nf-version" :class="{ 'nf-version-tapped': logUnlockHint }" @click="tapVersion" title="连点 5 次可打开运行日志">NoteFly v1.1</span>
+                    </div>
+                    <div class="muted">本地多平台内容分发工作台 · NoteFly · 数据全部存本机 data/ 目录</div>
+                    <!-- 连点版本号 5 次后才出现的日志入口 -->
+                    <div class="set-row set-row-log" v-if="logUnlocked">
+                      <el-icon class="set-ico"><Document /></el-icon>
+                      <div class="grow">
+                        <div class="strong">运行日志</div>
+                        <div class="muted">记录所有操作与报错：内容保存、发布执行、登录检查、AI 调用与异常堆栈</div>
+                        <div class="log-entry-actions">
+                          <el-button size="small" type="primary" plain @click="openLogPanel">查看日志</el-button>
+                          <el-button size="small" text @click="copyLogDir">复制日志目录</el-button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="set-row">
+                  <el-icon class="set-ico"><User /></el-icon>
+                  <div class="grow">
+                    <div class="strong">作者：{{ cfg.authorName || "爱吃桔子" }}</div>
+                    <div class="muted">xiaohaha@111.com</div>
+                  </div>
+                </div>
+              </el-card>
+            </div>
+          </div>
+        </template>
+
+        <!-- 内容编辑器（占满右侧内容区，左侧菜单保持可见） -->
+        <template v-if="page === 'editor'">
+          <div class="ce">
+            <div class="ce-top">
+              <el-input v-model="ceForm.title" class="ce-title" placeholder="在这里输入标题…" maxlength="120" show-word-limit></el-input>
+              <div class="ce-meta">
+                <el-select v-model="ceForm.type" style="width: 150px">
+                  <el-option v-for="(v, k) in typeLabels" :key="k" :label="v" :value="k"></el-option>
+                </el-select>
+                <el-input v-model="ceForm.digest" placeholder="摘要（公众号/文章类，选填）"></el-input>
+                <el-input v-model="ceForm.tagsStr" placeholder="标签，逗号分隔" style="max-width: 300px"></el-input>
+              </div>
+            </div>
+
+            <!-- 公众号排版栏：仅「微信公众号文章」形态显示 -->
+            <div class="ce-gzh" v-if="ceForm.gzhTheme">
+              <el-select v-model="ceForm.gzhTheme" size="small" style="width: 190px" placeholder="选择排版模板" @change="onGzhThemeChange">
+                <el-option v-for="t in gzhTemplates" :key="t.id" :label="t.name" :value="t.id">
+                  <span class="gzh-opt-name">{{ t.name }}</span>
+                  <span class="gzh-opt-scene">{{ t.scene }}</span>
+                </el-option>
+              </el-select>
+              <span class="muted gzh-scene">{{ gzhThemeScene }}</span>
+              <el-input v-model="cfg.authorName" size="small" placeholder="作者署名（用于文章尾部签名区）" style="width: 200px" @change="saveAuthor"></el-input>
+              <span class="grow"></span>
+              <el-button size="small" :disabled="!ceForm.body" @click="refreshGzhPreview()" :loading="gzhLoading">刷新预览</el-button>
+              <el-button size="small" type="primary" plain :disabled="!gzhHtml" @click="copyGzhHtml">复制到公众号</el-button>
+              <el-button size="small" :disabled="!gzhHtml" @click="exportGzhHtml">导出 HTML</el-button>
+            </div>
+
+            <div class="ce-toolbar">
+              <el-button size="small" @click="closeEditor">← 返回</el-button>
+              <span class="ce-divider"></span>
+              <el-radio-group v-model="ceMode" size="small">
+                <el-radio-button value="edit">编辑</el-radio-button>
+                <el-radio-button value="split">分屏</el-radio-button>
+                <el-radio-button value="preview">预览</el-radio-button>
+              </el-radio-group>
+              <span class="ce-divider"></span>
+              <el-button size="small" text @click="mdAction('h2')" title="二级标题">H2</el-button>
+              <el-button size="small" text @click="mdAction('b')" title="加粗">B</el-button>
+              <el-button size="small" text @click="mdAction('quote')" title="引用">引用</el-button>
+              <el-button size="small" text @click="mdAction('list')" title="列表">列表</el-button>
+              <el-button size="small" text @click="mdAction('code')" title="代码块">代码</el-button>
+              <el-button size="small" text @click="mdAction('link')" title="链接">链接</el-button>
+              <span class="ce-divider"></span>
+              <el-button size="small" @click="insertImageToBody">插入图片到正文</el-button>
+              <el-button size="small" type="warning" plain @click="checkForbidden">违禁词检测</el-button>
+              <span class="ce-divider"></span>
+              <el-button size="small" @click="openTextTool('format')" :disabled="!ceForm.body" title="规范化标题、列表、表格、中英文间距与标点">
+                <el-icon><magic-stick /></el-icon> 一键排版
+              </el-button>
+              <el-button size="small" @click="openTextTool('humanize')" :disabled="!ceForm.body" title="去掉套话、模板句式与 AI 味表达">
+                <el-icon><Brush /></el-icon> 去 AI 味
+              </el-button>
+              <el-button size="small" type="primary" plain @click="openAiPanel()"
+                :class="{ 'is-ai-locked': !aiReady }"
+                :title="aiReady ? '用大模型写稿、续写、润色' : '需要先接入 AI 模型：点击查看怎么接入'">
+                <el-icon><chat-dot-round /></el-icon> AI 写作
+              </el-button>
+              <span class="grow"></span>
+              <span class="muted" style="font-size: 12px">{{ bodyChars }} 字</span>
+              <el-button size="small" @click="closeEditor">取消</el-button>
+              <el-button size="small" :loading="ceSaving" @click="saveDraft" title="存为草稿并留在编辑器继续写">{{ ceSaving ? "保存中…" : "保存草稿" }}</el-button>
+              <el-button size="small" type="primary" :loading="ceSaving" @click="saveContent">{{ ceSaving ? "保存中…" : "保存" }}</el-button>
+              <input ref="bodyImgInput" id="bodyImgInput" type="file" accept="image/*" style="display:none" @change="uploadBodyImage" />
+            </div>
+
+            <div class="ce-main">
+              <div class="ce-pane" v-show="ceMode !== 'preview'">
+                <textarea v-model="ceForm.body" class="ce-textarea" spellcheck="false" placeholder="用 Markdown 写正文…&#10;&#10;支持 # 标题、**加粗**、- 列表、> 引用、``` 代码块、![](图片)"></textarea>
+              </div>
+              <div class="ce-pane ce-prev" v-show="ceMode !== 'edit'">
+                <!-- 公众号形态：预览服务端渲染出的公众号内联样式 HTML -->
+                <div v-if="ceForm.gzhTheme" class="gzh-preview" v-html="gzhHtml"></div>
+                <div v-else class="md-preview" v-html="bodyPreview"></div>
+              </div>
+            </div>
+
+            <div class="ce-bottom">
+              <span class="muted" style="font-size: 12px; white-space: nowrap">封面图</span>
+              <el-input v-model="ceForm.cover" placeholder="/uploads/ 图片路径或 https URL（公众号文章必填）" style="max-width: 480px">
+                <template #append>
+                  <el-dropdown split-button size="small" @click="$refs.coverInput.click()" @command="openCoverPicker">
+                    上传图片
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item command="picker"><el-icon><folder-opened /></el-icon>从素材库选择</el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
+                </template>
+              </el-input>
+              <input ref="coverInput" type="file" accept="image/*" style="display:none" @change="uploadCover" />
+              <img v-if="ceForm.cover" :src="coverPreviewSrc" class="cover-preview" />
+              <el-input v-if="ceForm.type === 'VIDEO' || ceForm.type === 'PODCAST'" v-model="ceForm.media" :placeholder="ceForm.type === 'VIDEO' ? '视频文件路径' : '音频文件路径'" style="max-width: 300px"></el-input>
+              <span class="grow"></span>
+              <span class="muted" style="font-size: 12px">默认填入各平台草稿箱待你确认；选择「立即发布」时，只有自动提交能力已验证的平台才会自动提交，其余停在草稿</span>
+            </div>
+          </div>
+        </template>
+      </el-main>
+    </el-container>
+  </el-container>
+
+  <!-- 素材库选封面 -->
+  <el-dialog v-model="coverPickerVisible" title="从素材库选择封面图" width="820px" class="nf-dialog">
+    <div v-if="coverImageOptions.length" class="cover-grid">
+      <button v-for="f in coverImageOptions" :key="f.name" class="cover-cell" type="button" @click="pickCover(f)">
+        <img :src="f.url" :alt="f.name" loading="lazy" />
+        <span class="cover-cell-name">{{ f.name }}</span>
+      </button>
+    </div>
+    <el-empty v-else description="素材库还没有图片 —— 先到「素材库」页上传，或点「上传图片」直接选文件"></el-empty>
+  </el-dialog>
+
+  <!-- 公众号排版模板选择 -->
+  <el-dialog v-model="gzhPickerVisible" title="选择公众号排版模板" width="820px" class="nf-dialog">
+    <div class="gzh-picker-lead">
+      <span class="grow">模板只影响公众号排版效果，正文仍是 Markdown，随时可以在编辑器里换模板。</span>
+    </div>
+    <div class="gzh-grid">
+      <button
+        v-for="t in gzhTemplates"
+        :key="t.id"
+        class="gzh-card"
+        :class="{ active: gzhPicked === t.id }"
+        type="button"
+        @click="gzhPicked = t.id"
+      >
+        <span class="gzh-swatch">
+          <i v-for="(c, ci) in t.swatch" :key="ci" :style="{ background: c }"></i>
+        </span>
+        <span class="gzh-card-name">{{ t.name }}</span>
+        <span class="gzh-card-en">{{ t.en }}</span>
+        <span class="gzh-card-scene">{{ t.scene }}</span>
+      </button>
+    </div>
+    <template #footer>
+      <el-button @click="gzhPickerVisible = false">取消</el-button>
+      <el-button type="primary" :disabled="!gzhPicked" @click="confirmGzhTemplate">用这个模板开始写</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- AI 写作台 -->
+  <el-dialog v-model="aiVisible" title="AI 写作台" width="980px" class="nf-dialog">
+    <div v-if="!aiReady" class="ai-notice">
+      <el-icon><info-filled /></el-icon>
+      <span class="grow">还没有配置 AI 模型。到「设置 → AI 模型」填服务地址、API Key 与模型名即可启用；未配置时「一键排版」「去 AI 味」照常可用（本地规则，不联网）。</span>
+      <el-button size="small" @click="goAiSettings">去配置</el-button>
+    </div>
+
+    <el-tabs v-model="aiTab" class="ai-tabs">
+      <el-tab-pane label="写文章" name="write">
+        <el-form label-width="80px" class="ai-form">
+          <el-form-item label="主题">
+            <el-input v-model="aiForm.topic" type="textarea" :rows="2" placeholder="例如：给 Vue3 组件库做按需加载的两种方案对比" />
+          </el-form-item>
+          <el-form-item label="风格">
+            <el-select v-model="aiForm.style" style="width: 100%">
+              <el-option v-for="s in aiStyles" :key="s.id" :label="s.name" :value="s.id">
+                <div class="ai-opt"><span>{{ s.name }}</span><span class="muted">{{ s.hint }}</span></div>
+              </el-option>
+            </el-select>
+          </el-form-item>
+          <el-form-item label="篇幅">
+            <el-input-number v-model="aiForm.words" :min="200" :max="8000" :step="200" controls-position="right" style="width: 160px" />
+            <span class="muted" style="margin-left: 10px">字</span>
+          </el-form-item>
+          <el-form-item label="目标读者">
+            <el-input v-model="aiForm.audience" placeholder="选填，例如：刚接触该技术的一线开发" />
+          </el-form-item>
+          <el-form-item label="关键词">
+            <el-input v-model="aiForm.keywords" placeholder="选填，逗号分隔，会要求写进正文" />
+          </el-form-item>
+          <el-form-item label="AI 标题">
+            <el-checkbox v-model="aiForm.withTitle">生成文章时一起生成标题</el-checkbox>
+            <span class="muted" style="margin-left: 10px">勾选后标题单独给出，可直接填进新建内容</span>
+          </el-form-item>
+          <el-form-item label="补充要求">
+            <el-input v-model="aiForm.extra" type="textarea" :rows="2" placeholder="选填，例如：要有真实踩坑过程、给出可运行的示例代码" />
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
+      <el-tab-pane label="续写" name="continue">
+        <el-form label-width="80px" class="ai-form">
+          <el-form-item label="接续点">
+            <el-input v-model="aiForm.before" type="textarea" :rows="6" placeholder="已有的正文内容（可留空，表示从开头续写）" />
+          </el-form-item>
+          <el-form-item label="已写内容">
+            <el-input v-model="aiForm.after" type="textarea" :rows="3" placeholder="接续点之后已经写好的部分（可留空）" />
+          </el-form-item>
+          <el-form-item label="接下来写">
+            <el-input v-model="aiForm.topic" type="textarea" :rows="2" placeholder="选填，这一段要展开什么" />
+          </el-form-item>
+          <el-form-item label="篇幅">
+            <el-input-number v-model="aiForm.words" :min="100" :max="4000" :step="100" controls-position="right" style="width: 160px" />
+            <span class="muted" style="margin-left: 10px">字</span>
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
+      <el-tab-pane label="润色改写" name="rewrite">
+        <el-form label-width="80px" class="ai-form">
+          <el-form-item label="动作">
+            <el-select v-model="aiForm.action" style="width: 100%">
+              <el-option v-for="a in aiRewriteActions" :key="a.id" :label="a.name" :value="a.id"></el-option>
+            </el-select>
+          </el-form-item>
+          <el-form-item label="待处理">
+            <el-input v-model="aiForm.text" type="textarea" :rows="8" placeholder="留空则处理编辑器中的选中内容，没有选中就处理全文" />
+          </el-form-item>
+          <el-form-item label="补充要求">
+            <el-input v-model="aiForm.extra" placeholder="选填，例如：保留所有技术名词原样" />
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+
+      <el-tab-pane label="深度去 AI 味" name="deai">
+        <el-form label-width="80px" class="ai-form">
+          <el-form-item label="力度">
+            <el-radio-group v-model="aiForm.strength">
+              <el-radio-button value="light">轻</el-radio-button>
+              <el-radio-button value="medium">中</el-radio-button>
+              <el-radio-button value="strong">强</el-radio-button>
+            </el-radio-group>
+            <span class="muted" style="margin-left: 12px">由模型重写句子结构，事实与论点一字不改</span>
+          </el-form-item>
+          <el-form-item label="待处理">
+            <el-input v-model="aiForm.text" type="textarea" :rows="8" placeholder="留空则处理编辑器中的选中内容，没有选中就处理全文" />
+          </el-form-item>
+        </el-form>
+      </el-tab-pane>
+    </el-tabs>
+
+    <div class="ai-result" v-if="aiResult">
+      <div class="ai-result-head">
+        <span class="strong">{{ aiResultTitle }}</span>
+        <span class="muted">{{ aiResultMeta }}</span>
+        <span class="grow"></span>
+        <el-button size="small" text @click="copyAiResult">复制</el-button>
+      </div>
+      <div class="ai-result-title" v-if="aiTitle">
+        <span class="nf-eyebrow">标题</span>
+        <span class="ai-title-text">{{ aiTitle }}</span>
+      </div>
+      <pre class="ai-result-body">{{ aiResult }}</pre>
+    </div>
+
+    <template #footer>
+      <el-button @click="aiVisible = false">关闭</el-button>
+      <span class="grow"></span>
+      <el-button v-if="aiResult && aiTab === 'write'" type="success" plain @click="fillToContent">填充到新建内容</el-button>
+      <el-button v-if="aiResult" @click="applyAiResult('append')">追加到末尾</el-button>
+      <el-button v-if="aiResult" @click="applyAiResult('replace')">替换正文</el-button>
+      <el-button v-if="aiResult" type="primary" plain @click="applyAiResult('insert')">插入光标处</el-button>
+      <el-button type="primary" :loading="aiBusy" @click="runAi">{{ aiTab === "write" ? "生成文章" : aiTab === "continue" ? "开始续写" : aiTab === "deai" ? "深度去味" : "开始处理" }}</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- 一键排版 / 去 AI 味 -->
+  <el-dialog v-model="ttVisible" :title="ttKind === 'format' ? '一键排版' : '去 AI 味'" width="1020px" class="nf-dialog">
+    <div class="tt-bar">
+      <span class="strong">改动强度</span>
+      <el-radio-group v-model="ttLevel" size="small" @change="runTextTool">
+        <el-radio-button value="light">轻</el-radio-button>
+        <el-radio-button value="medium">中</el-radio-button>
+        <el-radio-button value="strong">强</el-radio-button>
+      </el-radio-group>
+      <span class="ce-divider"></span>
+      <template v-if="ttKind === 'humanize'">
+        <el-tag size="small" effect="plain" :type="ttScore >= 60 ? 'danger' : ttScore >= 25 ? 'warning' : 'success'">AI 味 {{ ttScore }} 分</el-tag>
+        <span class="muted" style="font-size: 12px">{{ ttHitCount }} 处特征</span>
+        <span class="ce-divider"></span>
+        <el-tooltip
+          :content="aiReady ? '本地规则先清一遍，再交给模型重写句子结构；事实与论点不变' : '未接入模型：点击这里可直接去配置'"
+          placement="top">
+          <span class="ai-gate" :class="{ locked: !aiReady }" @click="onAiModeGate">
+            <el-checkbox v-model="ttAiMode" :disabled="!aiReady" @change="runTextTool">AI 深度改写</el-checkbox>
+          </span>
+        </el-tooltip>
+      </template>
+      <span class="grow"></span>
+      <el-button size="small" :loading="ttBusy" @click="runTextTool">{{ ttBusy ? (ttAiMode ? "AI 改写中…" : "处理中…") : "重新处理" }}</el-button>
+    </div>
+
+    <div class="tt-cols">
+      <div class="tt-pane">
+        <div class="tt-pane-head">原文<span class="tt-legend" v-if="ttMarked"><i class="tt-dot tt-dot-hit"></i>标红处为检测到的 AI 味</span></div>
+        <div class="tt-text" v-html="ttBeforeHtml"></div>
+      </div>
+      <div class="tt-pane">
+        <div class="tt-pane-head">处理后<span class="tt-legend" v-if="ttMarked"><i class="tt-dot tt-dot-fix"></i>标绿处为改写后的片段</span></div>
+        <div class="tt-text" v-html="ttAfterHtml"></div>
+      </div>
+    </div>
+
+    <div class="tt-changes" v-if="ttAiUsed">
+      <div class="tt-pane-head">处理方式</div>
+      <div class="tt-change-row">
+        <el-tag size="small" effect="plain" type="success">AI 深度改写</el-tag>
+        <span class="muted">本地规则预清洗 + 模型重写句子结构，逐条规则明细已不适用</span>
+      </div>
+    </div>
+    <div class="tt-changes" v-else-if="ttChanges.length">
+      <div class="tt-pane-head">改动明细</div>
+      <div class="tt-change-row" v-for="c in ttChanges" :key="c.rule">
+        <el-tag size="small" effect="plain">{{ c.label }}</el-tag>
+        <span class="muted">×{{ c.count }}</span>
+        <span class="tt-sample" v-if="c.samples && c.samples.length">{{ c.samples.join("　") }}</span>
+      </div>
+    </div>
+
+    <template #footer>
+      <el-button @click="ttVisible = false">取消</el-button>
+      <el-button type="primary" :disabled="!ttAfter || ttBusy" @click="applyTextTool">应用到正文</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- 账号设置弹窗 -->
+  <el-dialog v-model="amVisible" title="账号设置" width="420px">
+    <el-form label-width="90px">
+      <el-form-item label="备注别名"><el-input v-model="amForm.alias"></el-input></el-form-item>
+      <el-form-item label="分组"><el-input v-model="amForm.group"></el-input></el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="amVisible = false">取消</el-button>
+      <el-button type="primary" @click="saveAccountMeta">保存</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- 运行日志弹窗（设置 → 关于 → 连点版本号 5 次解锁） -->
+  <el-dialog v-model="logVisible" title="运行日志" width="1080px" class="nf-dialog log-dialog" @open="loadLogs" @closed="stopLogAuto">
+    <div class="log-bar">
+      <el-select v-model="logLevel" size="small" style="width: 140px" @change="loadLogs">
+        <el-option label="信息及以上" value="info"></el-option>
+        <el-option label="警告及以上" value="warn"></el-option>
+        <el-option label="仅看错误" value="error"></el-option>
+        <el-option label="全部（含调试）" value=""></el-option>
+      </el-select>
+      <el-input v-model="logKeyword" size="small" placeholder="搜索关键词…" style="max-width: 240px" @keyup.enter="loadLogs"></el-input>
+      <el-button size="small" @click="loadLogs">搜索</el-button>
+      <el-button size="small" :loading="logBusy" @click="loadLogs">刷新</el-button>
+      <span class="grow"></span>
+      <el-button size="small" :loading="logAuto" @click="toggleLogAuto">{{ logAuto ? "停止自动刷新" : "自动刷新" }}</el-button>
+      <el-button size="small" @click="copyLogText">复制日志</el-button>
+      <el-button size="small" @click="exportLogFile">导出文件</el-button>
+      <el-button size="small" @click="openLogDir">打开日志目录</el-button>
+      <el-button size="small" type="danger" plain @click="clearLogs">清空</el-button>
+    </div>
+
+    <div class="log-stat" v-if="logStats">
+      <span>当前显示 <b>{{ logEntries.length }}</b> 条</span>
+      <span class="log-stat-sep">·</span>
+      <span>全部 <b>{{ logStats.total }}</b> 条</span>
+      <span class="log-stat-sep">·</span>
+      <span>错误 <b class="log-lv-error">{{ logStats.byLevel.error || 0 }}</b></span>
+      <span>警告 <b class="log-lv-warn">{{ logStats.byLevel.warn || 0 }}</b></span>
+      <span>信息 <b>{{ logStats.byLevel.info || 0 }}</b></span>
+      <span>调试 <b>{{ logStats.byLevel.debug || 0 }}</b></span>
+      <span class="grow"></span>
+      <span class="muted log-path" :title="logStats.dir">日志目录：{{ logStats.dir }}</span>
+    </div>
+
+    <div class="log-list" v-loading="logBusy">
+      <div class="log-empty" v-if="!logBusy && !logEntries.length">暂无日志记录</div>
+      <div class="log-row" v-for="(e, i) in logEntries" :key="i" :class="'log-row-' + e.level">
+        <span class="log-time">{{ logTime(e.ts) }}</span>
+        <span class="log-level" :class="'log-lv-' + e.level">{{ logLevelText(e.level) }}</span>
+        <span class="log-scope">{{ e.scope }}</span>
+        <span class="log-msg">{{ e.message }}</span>
+        <span class="log-extra" v-if="e.extra">{{ logExtraText(e.extra) }}</span>
+      </div>
+    </div>
+
+    <template #footer>
+      <el-button @click="logVisible = false">关闭</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- 任务详情弹窗 -->
+  <el-dialog v-model="taskVisible" :title="'任务详情 · ' + (curTask ? curTask.title : '')" width="760px">
+    <div class="muted mb8" v-if="curTask">方式: {{ (curTask.mode || "draft") === "publish" ? "立即发布" : "发布到草稿箱" }} · 状态: <b>{{ taskStatus(curTask) }}</b><span v-if="curTask.statusReason">（{{ curTask.statusReason }}）</span> · 创建: {{ fmt(curTask.createdAt) }} · 定时: {{ curTask.scheduledAt ? fmt(curTask.scheduledAt) : "-" }}</div>
+    <el-alert v-if="curTask && curTask.error" type="error" :closable="false" show-icon style="margin-bottom: 10px"
+      :title="'失败原因：' + curTask.error"></el-alert>
+    <div v-if="taskTargets.length">
+      <div v-for="t in taskTargets" :key="t.accountId" class="task-target">
+        <el-tag size="small" effect="plain" style="width: 110px; text-align: center">{{ t.platform }}</el-tag>
+        <el-tag size="small" :type="targetTagType(t.status)">{{ tName[t.status] || t.status }}</el-tag>
+        <a v-if="t.postUrl" class="muted" :href="t.postUrl" target="_blank">查看</a>
+        <span v-if="t.error" class="muted">{{ t.error }}</span>
+        <el-tag v-if="t.capabilityLimited" size="small" type="warning" effect="plain">能力受限</el-tag>
+        <span class="grow"></span>
+        <el-button v-if="t.status === 'ready' || t.status === 'needs_manual'" size="small" type="primary" @click="submitTarget(t.accountId)">发布此平台</el-button>
+        <el-button v-if="t.status === 'failed'" size="small" :loading="submitBusy" @click="retryTarget(t.accountId)">重试</el-button>
+        <el-dropdown v-if="t.status !== 'success' && t.status !== 'failed'" @command="(k) => openTargetPlatform(t.accountId, k)">
+          <el-button size="small">打开平台<el-icon class="el-icon--right"><arrow-down /></el-icon></el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="compose">打开创作后台</el-dropdown-item>
+              <el-dropdown-item command="home">打开平台首页</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <template v-if="t.status === 'unknown' || t.status === 'accepted' || t.status === 'reviewing'">
+          <el-button size="small" @click="verifyTarget(t.accountId)">核验</el-button>
+          <el-button size="small" type="success" plain @click="confirmTarget(t.accountId, true)">确认已发布</el-button>
+          <el-button v-if="t.status === 'unknown'" size="small" type="danger" plain @click="confirmTarget(t.accountId, false)">登记失败</el-button>
+        </template>
+        <el-tooltip v-if="t.verifiedBy === 'manual'" content="该结果由人工确认登记，非平台自动核验" placement="top">
+          <el-tag size="small" type="info" effect="plain">人工确认</el-tag>
+        </el-tooltip>
+      </div>
+    </div>
+    <el-empty v-else description="暂无目标状态（定时任务未到执行时间或任务尚未创建）" :image-size="60"></el-empty>
+    <!-- 数据登记（蚁小二功能：已成功平台可登记阅读/互动数据） -->
+    <template v-if="successTargets.length">
+      <div class="strong" style="margin: 16px 0 8px">数据登记（发布成功后从平台后台抄录，数据看板自动聚合）</div>
+      <el-table :data="successTargets" size="small">
+        <el-table-column prop="platform" label="平台" width="100"></el-table-column>
+        <el-table-column label="阅读/播放" width="130">
+          <template #default="{ row }"><el-input-number v-model="metricsDraft[row.accountId].reads" :min="0" size="small" style="width: 110px"></el-input-number></template>
+        </el-table-column>
+        <el-table-column label="点赞" width="130">
+          <template #default="{ row }"><el-input-number v-model="metricsDraft[row.accountId].likes" :min="0" size="small" style="width: 110px"></el-input-number></template>
+        </el-table-column>
+        <el-table-column label="评论" width="130">
+          <template #default="{ row }"><el-input-number v-model="metricsDraft[row.accountId].comments" :min="0" size="small" style="width: 110px"></el-input-number></template>
+        </el-table-column>
+        <el-table-column label="转发" width="130">
+          <template #default="{ row }"><el-input-number v-model="metricsDraft[row.accountId].shares" :min="0" size="small" style="width: 110px"></el-input-number></template>
+        </el-table-column>
+        <el-table-column label="操作" width="80">
+          <template #default="{ row }"><el-button size="small" type="primary" @click="saveMetrics(row.accountId)">保存</el-button></template>
+        </el-table-column>
+      </el-table>
+    </template>
+    <template #footer>
+      <el-button @click="taskVisible = false">关闭</el-button>
+      <el-button v-if="readyTargets.length" type="primary" @click="submitAll">发布这 {{ readyTargets.length }} 个平台</el-button>
+    </template>
+  </el-dialog>
+</div>
+
+<script>
+const { createApp, reactive, toRefs, computed, onMounted, onBeforeUnmount, ref, watch } = Vue;
+const { ElMessage, ElMessageBox, ElNotification } = ElementPlus;
+
+/* 任务表格子组件 */
+const TaskTable = {
+  props: { tasks: Array, withActions: Boolean },
+  emits: ["view"],
+  setup(props) {
+    const typeLabels = { ARTICLE: "文章", DYNAMIC: "图文动态", VIDEO: "视频", PODCAST: "播客" };
+    /* 状态文案与颜色集中在一处，任务表/详情/统计含义一致。
+       颜色语义：成功绿、执行/审核蓝、人工处理与待核验橙、明确失败红 */
+    const statusName = {
+      scheduled: "定时待发", creating: "创建中", queued: "排队执行", running: "进行中", publishing: "进行中",
+      in_review: "审核中",
+      draft_ready: "草稿待确认", needs_manual: "等待人工", partial: "部分成功",
+      done: "已完成", failed: "有失败", unknown: "结果待核验",
+    };
+    const tName = {
+      pending: "排队中", filling: "填入中", draft_saving: "草稿保存中", ready: "草稿待确认",
+      needs_manual: "等待人工", submitting: "提交中", accepted: "已受理", reviewing: "审核中",
+      success: "已发布", failed: "失败", unknown: "结果未知",
+    };
+    /* 任务状态 → el-tag type */
+    const statusTagType = (s) =>
+      s === "failed" ? "danger"
+        : s === "done" ? "success"
+          : s === "partial" || s === "draft_ready" || s === "needs_manual" || s === "unknown" ? "warning"
+            : "primary"; /* in_review（审核中）与其余执行中状态一样蓝色 */ /* scheduled/creating/queued/running/publishing 都是执行中语义，蓝色 */
+    const targetTagType = (s) =>
+      s === "success" ? "success"
+        : s === "failed" ? "danger"
+          : s === "accepted" || s === "reviewing" ? "primary"   /* 平台明确受理/审核中 ≠ 异常 */
+            : s === "ready" || s === "needs_manual" || s === "unknown" ? "warning"
+              : "info";
+    const taskStatus = (row) => (row ? statusName[row.status] || row.status : "");
+    const fmt = (iso) => (iso ? new Date(iso).toLocaleString("zh-CN", { hour12: false }) : "-");
+    return { typeLabels, statusName, tName, statusTagType, targetTagType, taskStatus, fmt };
+  },
+  template: `
+  <el-table :data="tasks" empty-text="暂无发布任务">
+    <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip></el-table-column>
+    <el-table-column label="类型" width="90">
+      <template #default="{ row }"><el-tag size="small" effect="plain">{{ typeLabels[row.type] || row.type }}</el-tag></template>
+    </el-table-column>
+    <el-table-column label="方式" width="100">
+      <template #default="{ row }">
+        <el-tag size="small" :type="(row.mode || 'draft') === 'publish' ? 'warning' : 'info'" effect="plain">{{ (row.mode || 'draft') === 'publish' ? '立即发布' : '草稿箱' }}</el-tag>
+      </template>
+    </el-table-column>
+    <el-table-column label="状态" width="110">
+      <template #default="{ row }">
+        <el-tooltip :content="row.statusReason || ''" :disabled="!row.statusReason" placement="top">
+          <el-tag size="small" :type="statusTagType(row.status)">{{ taskStatus(row) }}</el-tag>
+        </el-tooltip>
+      </template>
+    </el-table-column>
+    <el-table-column label="各平台" min-width="230">
+      <template #default="{ row }">
+        <el-tooltip v-for="t in ((row.lastStatus && row.lastStatus.targets) || [])" :key="t.accountId"
+          :content="t.error || tName[t.status] || t.status" placement="top">
+          <el-tag size="small"
+            :type="targetTagType(t.status)" class="mr4" style="cursor: default">{{ t.platform }}:{{ tName[t.status] || t.status }}</el-tag>
+        </el-tooltip>
+        <span v-if="!((row.lastStatus && row.lastStatus.targets) || []).length" class="muted">{{ row.status === "queued" ? "排队执行中…" : row.status === "scheduled" ? "定时待发，到点自动执行" : "等待填充…" }}</span>
+      </template>
+    </el-table-column>
+    <el-table-column label="创建时间" width="165">
+      <template #default="{ row }"><span class="muted">{{ fmt(row.createdAt) }}</span></template>
+    </el-table-column>
+    <el-table-column v-if="withActions" label="操作" width="90">
+      <template #default="{ row }"><el-button size="small" @click="$emit('view', row.id)">详情</el-button></template>
+    </el-table-column>
+  </el-table>`,
+};
+
+const app = createApp({
+  setup() {
+    const state = reactive({
+      page: "dashboard",
+      engine: "rpa",
+      engineOk: false,
+      rpaPlatforms: [],     /* 平台清单（按 id 索引）：用于「打开平台」按 ID 取地址 */
+      accounts: [], contents: [], tasks: [],
+      stats: {},
+      pubContentId: "", pubAccounts: [], pubTime: null, pubMode: "draft", pubBusy: false,
+      ceBack: "contents", ceForm: {}, ceMode: "split", ceSaving: false, ceDirty: false, ceEditing: false,
+      /* 公众号排版：模板清单 / 模板选择器 / 渲染产物 */
+      gzhTemplates: [], gzhPickerVisible: false, gzhPicked: "", coverPickerVisible: false,
+      gzhHtml: "", gzhLoading: false, gzhWarn: "",
+      amVisible: false, amForm: {},
+      taskVisible: false, curTask: null, taskTargets: [], submitBusy: false,
+      cfg: { checkInterval: null, authorName: "", authorBio: "", dataDir: "", dataDirIsDefault: true },
+      dataWarnings: [],
+      /* 数据存储位置 */
+      dataDirInput: "", dataDirBusy: false,
+      mediaFiles: [],
+      metricsSummary: [],
+      calYear: new Date().getFullYear(), calMonth: new Date().getMonth() + 1,
+      metricsDraft: {},
+      themeDark: localStorage.getItem("nf-dark") !== "0", // 默认深色（MultiPost 风格），用户显式切浅色才记忆为浅
+      checkWordsOnPublish: localStorage.getItem("nf-checkwords") !== "0",
+      draftAlwaysOn: true,
+      ka: { enabled: false, intervalHours: 4, lastRun: null, lastOnline: 0, lastTotal: 0, details: [] },
+      kaBusy: false,
+      /* AI 写作台 */
+      aiVisible: false, aiTab: "write", aiBusy: false, aiResult: "", aiTitle: "", aiResultTitle: "", aiResultMeta: "",
+      aiReady: false, aiStyles: [], aiPresets: [], aiRewriteActions: [],
+      aiForm: { topic: "", style: "tech", words: 1200, audience: "", keywords: "", extra: "", before: "", after: "", action: "polish", text: "", strength: "medium", withTitle: true },
+      /* 一键排版 / 去 AI 味 */
+      ttVisible: false, ttKind: "format", ttLevel: "medium", ttBusy: false, ttBefore: "", ttAfter: "", ttChanges: [], ttScore: 0, ttHitCount: 0,
+      /* 原文/处理后两栏是渲染过的 HTML（检测位置用 <mark> 标出）；ttMarked 控制图例 */
+      ttBeforeHtml: "", ttAfterHtml: "", ttMarked: false,
+      /* AI 深度改写（去 AI 味专用）：走模型重写句子结构，本地规则只做预清洗 */
+      ttAiMode: false, ttAiUsed: false, ttAiError: "",
+      /* AI 模型配置 */
+      aiCfg: { preset: "custom", baseUrl: "", apiKey: "", model: "", temperature: 0.7, maxTokens: 4096, timeoutSec: 180, keyMasked: "", ready: false, connected: false },
+      aiSaveBusy: false, aiTestBusy: false,
+      acctSearch: "", checkAllBusy: false, loginPickerVisible: false,
+      accountsOutdated: 0,   // 因判定规则升级而作废的旧登录态结论条数
+      bUrl: "https://juejin.cn/",
+      loginCtx: null,       // 正在内置浏览器里登录的平台 { id, label, url }
+      loginBusy: false,
+      keyCtx: null,         // 正在内置浏览器里申请 API Key 的服务 { name, url }
+      isElectron: /Electron/i.test(navigator.userAgent),
+      /* 运行日志：设置 → 关于 → 连点版本号 5 次解锁「查看日志」 */
+      logUnlocked: false,   // 是否已解锁日志入口
+      logUnlockHint: false, // 连点过程中的轻提示（点够 5 次后消失）
+      logVisible: false,    // 日志弹窗
+      logEntries: [], logStats: null, logLevel: "info", logKeyword: "", logBusy: false, logAuto: false,
+    });
+
+    const typeLabels = { ARTICLE: "文章", DYNAMIC: "图文动态", VIDEO: "视频", PODCAST: "播客" };
+    const typeLabel = (t) => typeLabels[t] || t;
+    /* 与 TaskTable 保持同一份语义：任务状态与目标状态是两套字典，不能混用 */
+    const statusName = {
+      scheduled: "定时待发", creating: "创建中", queued: "排队执行", running: "进行中", publishing: "进行中",
+      in_review: "审核中",
+      draft_ready: "草稿待确认", needs_manual: "等待人工", partial: "部分成功",
+      done: "已完成", failed: "有失败", unknown: "结果待核验",
+    };
+    const tName = {
+      pending: "排队中", filling: "填入中", draft_saving: "草稿保存中", ready: "草稿待确认",
+      needs_manual: "等待人工", submitting: "提交中", accepted: "已受理", reviewing: "审核中",
+      success: "已发布", failed: "失败", unknown: "结果未知",
+    };
+    const statusTagType = (s) =>
+      s === "failed" ? "danger"
+        : s === "done" ? "success"
+          : s === "partial" || s === "draft_ready" || s === "needs_manual" || s === "unknown" ? "warning"
+            : "primary"; /* in_review（审核中）与其余执行中状态一样蓝色 */
+    const targetTagType = (s) =>
+      s === "success" ? "success"
+        : s === "failed" ? "danger"
+          : s === "accepted" || s === "reviewing" ? "primary"
+            : s === "ready" || s === "needs_manual" || s === "unknown" ? "warning"
+              : "info";
+    const taskStatus = (row) => (row ? statusName[row.status] || row.status : "");
+    const fmt = (iso) => (iso ? new Date(iso).toLocaleString("zh-CN", { hour12: false }) : "-");
+    const pageTitle = computed(() => (state.page === "editor" ? (state.ceForm.id ? "编辑内容" : "新建内容") : { dashboard: "工作台", publish: "发布中心", contents: "内容库", media: "素材库", tasks: "发布记录", calendar: "发布日历", metrics: "数据看板", browser: "内置浏览器", accounts: "账号管理", settings: "设置" }[state.page]));
+    const pageDesc = computed(() => ({
+      dashboard: "内容总量与发布任务总览",
+      publish: "选择内容与目标账号，一键分发到多个平台（默认草稿模式）",
+      contents: "管理你的稿件库，支持 Markdown 编辑、导入与违禁词检测",
+      media: "图片 / 视频 / 音频素材统一管理，路径可直接用于内容",
+      tasks: "每次发布的执行记录，可逐平台提交、重试与登记数据",
+      calendar: "定时任务月历视图，点击任务查看详情",
+      metrics: "各平台阅读 / 点赞 / 评论 / 转发数据汇总",
+      browser: "软件内嵌浏览器（桌面版专属）—— 账号登录也在这里完成，登录态自动同步给发布引擎",
+      accounts: "列表只显示登录成功的平台；点「登录账号」选择平台开始登录，支持分组管理",
+      editor: "Markdown 写作：左侧编辑、右侧实时预览，草稿保存到本地内容库",
+      settings: "按需自定义你的工作台",
+    }[state.page]));
+    const engineText = computed(() => (state.engineOk ? "NoteFly RPA 引擎就绪" : "引擎未连接"));
+    /* ---------- 登录态口径 ----------
+       登录态来自「一次性巡检的快照」，不是实时事实。四种状态：
+         on      上次检查确认已登录，且结果仍在有效期内
+         stale   上次检查说已登录，但结果已过期（不能当成现在还登着）
+         off     上次检查确认未登录
+         unknown 从未检查过
+       宁可报「未登录 / 待复核」也不误报「已登录」——误报会让用户以为能发布，
+       真发布时又被 preflight 拦下，体验更差。 */
+    const LOGIN_STATE = {
+      on: { text: "已登录", dot: "ok", tag: "success" },
+      stale: { text: "待复核", dot: "wait", tag: "info" },
+      off: { text: "未登录", dot: "bad", tag: "danger" },
+      unknown: { text: "待检查", dot: "wait", tag: "info" },
+    };
+    function loginState(a) {
+      if (!a) return "unknown";
+      if (a.isLoggedIn === true) return a.stale ? "stale" : "on";
+      if (a.isLoggedIn === false) return "off";
+      return "unknown";
+    }
+    const loginMeta = (a) => LOGIN_STATE[loginState(a)];
+    const loginText = (a) => loginMeta(a).text;
+    const loginDot = (a) => loginMeta(a).dot;
+    const loginTag = (a) => loginMeta(a).tag;
+    /* 曾登录成功（含结果过期）——账号管理与发布中心的可选范围 */
+    const isLoggedAny = (a) => {
+      const s = loginState(a);
+      return s === "on" || s === "stale";
+    };
+    /* 内置浏览器快捷方式：只列已登录的平台 + 「新建页面」入口（空 url = 新开空白页自由输入） */
+    const bShortcuts = computed(() => {
+      const loggedIn = state.accounts.filter((a) => isLoggedAny(a));
+      return loggedIn.map((a) => ({ label: a.alias || a.displayName || a.platform, url: a.homeUrl || a.loginUrl || "" }));
+    });
+    /* 刊头眉标：让顶栏始终说清"你在哪一块" */
+    const pageSection = computed(() => ({
+      dashboard: "Overview · 总览",
+      publish: "Distribution · 分发",
+      contents: "Library · 稿件",
+      media: "Assets · 素材",
+      tasks: "Records · 记录",
+      calendar: "Schedule · 排期",
+      metrics: "Insight · 洞察",
+      browser: "Browser · 登录",
+      accounts: "Accounts · 账号",
+      editor: "Writing · 写作",
+      settings: "System · 系统",
+    }[state.page] || "NoteFly"));
+    /* 账号统计口径：RPA 的 accounts 是"可连接平台"注册表，未登录的不能算已连接 */
+    const acctOnlineCount = computed(() => state.accounts.filter((a) => loginState(a) === "on").length);
+    const acctStaleCount = computed(() => state.accounts.filter((a) => loginState(a) === "stale").length);
+    const statCards = computed(() => [
+      { eyebrow: "Contents", num: state.stats.contents || 0, label: "内容库稿件" },
+      { eyebrow: "Tasks", num: state.stats.totalTasks || 0, label: "发布任务总数" },
+      { eyebrow: "Scheduled", num: state.stats.scheduled || 0, label: "待执行定时任务" },
+      { eyebrow: "Accounts", num: acctOnlineCount.value, label: "已登录账号（共 " + state.accounts.length + " 个平台）" },
+    ]);
+
+    /* 状态分布：按语义分组上色，避免同一语义在不同状态码下颜色不一致 */
+    const STATUS_TONE = {
+      done: "var(--nf-ok)",
+      partial: "var(--nf-warn)",
+      draft_ready: "var(--nf-warn)",
+      needs_manual: "var(--nf-warn)",
+      unknown: "var(--nf-warn)",
+      failed: "var(--nf-danger)",
+      in_review: "var(--nf-info)",
+      running: "var(--nf-info)",
+      publishing: "var(--nf-info)",
+      queued: "var(--nf-info)",
+      creating: "var(--nf-info)",
+      scheduled: "var(--nf-ink-3)",
+    };
+    const statusDist = computed(() => {
+      const by = state.stats.byStatus || {};
+      /* 固定顺序：终态在前，执行中在后，读数才符合直觉 */
+      const order = ["done", "partial", "failed", "draft_ready", "needs_manual", "unknown", "in_review", "running", "publishing", "queued", "creating", "scheduled"];
+      const keys = Object.keys(by).sort((a, b) => {
+        const ia = order.indexOf(a), ib = order.indexOf(b);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+      });
+      return keys.map((k) => ({
+        key: k,
+        label: statusName[k] || k,
+        count: by[k] || 0,
+        color: STATUS_TONE[k] || "var(--nf-ink-3)",
+      })).filter((x) => x.count > 0);
+    });
+
+    /* 平台表现：把平台 ID 换成中文名，并按总量排序 */
+    const platformLabel = (key) => {
+      const hit = state.accounts.find((a) => a.id === key || a.platform === key);
+      if (hit) return hit.displayName || hit.alias || key;
+      const p = state.rpaPlatforms.find((x) => x.id === key);
+      return p ? p.label : key;
+    };
+    const platformRank = computed(() => {
+      const by = state.stats.byPlatform || {};
+      const list = Object.keys(by).map((k) => ({
+        key: k,
+        label: platformLabel(k),
+        total: by[k].total || 0,
+        success: by[k].success || 0,
+        failed: by[k].failed || 0,
+      }));
+      /* 先按总量、再按成功数排序，首行即最高量 */
+      list.sort((a, b) => b.total - a.total || b.success - a.success);
+      const max = list.length ? list[0].total : 0;
+      /* ratio：条长 = 该平台量级占最高量级的比例；条内堆叠 = 成功 / 失败 / 其余（待确认等）构成 */
+      return list.map((x) => ({
+        ...x,
+        other: Math.max(0, x.total - x.success - x.failed),
+        ratio: max ? x.total / max : 0,
+      }));
+    });
+
+    /* 发布中心步骤：内容/账号就绪后自动推进到设置步骤 */
+    const pubStep = computed(() => {
+      if (!state.pubContentId) return 1;
+      if (!state.pubAccounts.length) return 2;
+      return 3;
+    });
+
+    const pubContent = computed(() => state.contents.find((c) => c.id === state.pubContentId));
+
+    /* ---------- 账号管理（MultiPost 风格） ---------- */
+    /* 账号列表只显示登录成功的平台；未登录的平台在「登录账号」弹窗里选 */
+    const filteredAccounts = computed(() => state.accounts.filter((a) => {
+      if (!isLoggedAny(a)) return false;   /* 只列「曾登录成功」的，含待复核 */
+      const q = state.acctSearch.trim().toLowerCase();
+      return !q || [a.alias, a.displayName, a.username, a.platform].some((s) => (s || "").toLowerCase().includes(q));
+    }));
+    const groupOptions = computed(() => ["未分组", ...Array.from(new Set(state.accounts.map((a) => a.group).filter((g) => g && g !== "未分组")))]);
+    const acctTotal = computed(() => state.accounts.length);
+    /* 「已登录」只统计结果仍在有效期内的；过期的单列为「待复核」 */
+    const acctOnline = computed(() => state.accounts.filter((a) => loginState(a) === "on").length);
+    const acctStale = computed(() => state.accounts.filter((a) => loginState(a) === "stale").length);
+
+    /* 登录平台弹窗 → 进内置浏览器登录 */
+    function pickLoginPlatform(a) {
+      state.loginPickerVisible = false;
+      startLogin(a);
+    }
+
+    async function saveGroup(row, v) {
+      await api("/accounts/" + row.id + "/meta", { method: "POST", body: { group: v } });
+      row.group = v;
+      ElMessage.success("分组已更新");
+    }
+    async function checkAllLogins() {
+      state.checkAllBusy = true;
+      try {
+        const r = await api("/keepalive/run", { method: "POST" });
+        if (r.error) { ElMessage.warning(r.error); return; }
+        const a = await api("/accounts");
+        state.accounts = a.accounts || [];
+        state.accountsOutdated = a.outdated || 0;
+        const off = (r.details || []).filter((d) => d.online === false);
+        if (off.length) {
+          ElNotification({ title: "巡检完成 " + r.lastOnline + "/" + r.lastTotal + " 在线", message: "掉线/未登录：" + off.map((d) => d.platform).join("、"), type: "warning", duration: 6000 });
+        } else {
+          ElMessage.success("巡检完成：" + r.lastOnline + "/" + r.lastTotal + " 全部在线");
+        }
+      } finally {
+        state.checkAllBusy = false;
+      }
+    }
+    const readyTargets = computed(() => state.taskTargets.filter((t) => t.status === "ready"));
+    /* 发布中心②的账号表：只列曾登录成功的平台（未登录发不出去，列出来只会误导勾选）；
+       待复核的仍列出，但标注出来，避免用户以为一定是好的 */
+    const pubAccountOptions = computed(() => state.accounts.filter((a) => isLoggedAny(a)));
+    const successTargets = computed(() => state.taskTargets.filter((t) => t.status === "success"));
+    const metricCards = computed(() => {
+      const s = state.metricsSummary;
+      return [
+        { eyebrow: "Reads", num: s.reduce((a, x) => a + x.reads, 0), label: "总阅读/播放" },
+        { eyebrow: "Likes", num: s.reduce((a, x) => a + x.likes, 0), label: "总点赞" },
+        { eyebrow: "Comments", num: s.reduce((a, x) => a + x.comments, 0), label: "总评论" },
+        { eyebrow: "Shares", num: s.reduce((a, x) => a + x.shares, 0), label: "总转发" },
+      ];
+    });
+    /* 发布日历：按月生成 6x7 网格，标记任务 */
+    const calDays = computed(() => {
+      const y = state.calYear, m = state.calMonth;
+      const first = new Date(y, m - 1, 1);
+      const daysInMonth = new Date(y, m, 0).getDate();
+      const lead = (first.getDay() + 6) % 7; // 周一开头
+      const byDay = {};
+      for (const t of state.tasks) {
+        if (t.status === "scheduled" && t.scheduledAt) {
+          const d = new Date(t.scheduledAt);
+          if (d.getFullYear() === y && d.getMonth() === m - 1) {
+            (byDay[d.getDate()] = byDay[d.getDate()] || []).push(t);
+          }
+        }
+      }
+      const cells = [];
+      for (let i = 0; i < lead; i++) cells.push({ day: 0 });
+      const today = new Date();
+      for (let d = 1; d <= daysInMonth; d++) {
+        cells.push({
+          day: d,
+          isToday: today.getFullYear() === y && today.getMonth() === m - 1 && today.getDate() === d,
+          tasks: byDay[d] || [],
+        });
+      }
+      while (cells.length % 7) cells.push({ day: 0 });
+      return cells;
+    });
+
+    /* ---------- 素材库 ---------- */
+    async function loadMedia() {
+      const r = await api("/media");
+      state.mediaFiles = r.files || [];
+    }
+    function uploadMedia(e) {
+      const files = Array.from(e.target.files || []);
+      let done = 0;
+      for (const file of files) {
+        if (file.size > 100 * 1024 * 1024) { ElMessage.error(file.name + " 超过 100MB"); continue; }
+        const reader = new FileReader();
+        reader.onload = async () => {
+          await api("/upload", { method: "POST", body: { name: file.name, data: reader.result } });
+          if (++done === files.length) { ElMessage.success("已上传 " + files.length + " 个素材"); loadMedia(); }
+        };
+        reader.readAsDataURL(file);
+      }
+      e.target.value = "";
+    }
+    async function delMedia(f) {
+      await ElMessageBox.confirm("确定删除素材 " + f.name + "？（不影响已发布内容）", "提示", { type: "warning" });
+      await api("/media?name=" + encodeURIComponent(f.name), { method: "DELETE" });
+      loadMedia();
+    }
+    function copyMediaPath(f) {
+      navigator.clipboard.writeText(f.path).then(() => ElMessage.success("路径已复制"));
+    }
+
+    /* ---------- 数据看板 ---------- */
+    async function loadMetrics() {
+      const r = await api("/metrics/summary");
+      state.metricsSummary = r.summary || [];
+    }
+    async function saveMetrics(accountId) {
+      const d = state.metricsDraft[accountId] || {};
+      await api(`/tasks/${state.curTask.id}/metrics/${accountId}`, { method: "POST", body: d });
+      ElMessage.success("已登记");
+    }
+
+    /* ---------- 违禁词检测（蚁小二内容风控） ---------- */
+    async function checkForbidden() {
+      const text = (state.ceForm.title || "") + "\n" + (state.ceForm.body || "");
+      const r = await api("/checkwords", { method: "POST", body: { text } });
+      if (!r.ok) return apiError("违禁词检测失败", r);
+      /* 词库不可用 ≠ 未检出：必须如实告知“本次没有检测”，不能伪装成检查通过 */
+      if (r.status === "unavailable") return ElMessage.warning(r.note || "词库不可用，本次未检测");
+      if (r.status !== "checked") return ElMessage.warning("本次未检测（未提交文本）");
+      if (!r.hits.length) return ElMessage.success("未检出违禁词");
+      ElMessageBox.alert(
+        r.hits.map((h) => `「${h.word}」× ${h.count}`).join("、"),
+        `检出 ${r.hits.length} 个风险词（广告法/平台风控）`,
+        { type: "warning", confirmButtonText: "知道了" }
+      );
+    }
+    /* ================= AI 写作台 ================= */
+
+    /* 取编辑器中的选中内容；没有选中就返回空 */
+    function currentSelection() {
+      const ta = document.querySelector(".ce-textarea");
+      if (!ta) return "";
+      const s = ta.selectionStart;
+      const e = ta.selectionEnd;
+      if (s == null || e == null || s === e) return "";
+      return String(state.ceForm.body || "").slice(s, e);
+    }
+
+    async function loadAiConfig() {
+      const r = await api("/ai/config");
+      if (!r.ok) return apiError("读取 AI 配置失败", r);
+      state.aiReady = !!r.connected;          /* 真正接入（Key 也在手）才算可用 */
+      state.aiStyles = r.styles || [];
+      state.aiPresets = r.presets || [];
+      state.aiRewriteActions = r.rewriteActions || [];   // 润色改写子动作（服务端与提示词同一份清单）
+      /* Key 永不回传：这里只同步掩码，输入框里用户没填的内容保持不动 */
+      state.aiCfg.preset = r.preset || "custom";
+      state.aiCfg.baseUrl = r.baseUrl || "";
+      state.aiCfg.model = r.model || "";
+      state.aiCfg.temperature = r.temperature;
+      state.aiCfg.maxTokens = r.maxTokens;
+      state.aiCfg.timeoutSec = r.timeoutSec;
+      state.aiCfg.keyMasked = r.keyMasked || "";
+      state.aiCfg.ready = !!r.ready;
+      state.aiCfg.connected = !!r.connected;
+    }
+
+    const aiModels = computed(() => {
+      const p = state.aiPresets.find((x) => x.id === state.aiCfg.preset);
+      return p && p.models ? p.models : [];
+    });
+
+    /* 当前选中的服务预设（申请页、Key 说明都挂在它身上） */
+    const aiPreset = computed(() => {
+      const p = state.aiPresets.find((x) => x.id === state.aiCfg.preset);
+      return p || { id: "custom", name: "自定义服务", keyUrl: "", keyNote: "", models: [] };
+    });
+
+    function applyAiPreset(id) {
+      const p = state.aiPresets.find((x) => x.id === id);
+      if (!p) return;
+      if (p.baseUrl) state.aiCfg.baseUrl = p.baseUrl;
+      if (p.models && p.models.length && p.models.indexOf(state.aiCfg.model) < 0) {
+        state.aiCfg.model = p.models[0];
+      }
+    }
+
+    async function saveAiConfig() {
+      state.aiSaveBusy = true;
+      const r = await api("/ai/config", { method: "POST", body: { ...state.aiCfg } });
+      state.aiSaveBusy = false;
+      if (!r.ok) return apiError("保存 AI 配置失败", r);
+      state.aiCfg.keyMasked = r.keyMasked || "";
+      state.aiCfg.ready = !!r.ready;
+      state.aiCfg.connected = !!r.connected;
+      state.aiReady = !!r.connected;
+      state.aiCfg.apiKey = "";  /* Key 已落盘，输入框不再保留明文 */
+      ElMessage.success(r.connected ? "AI 配置已保存，已接入" : "AI 配置已保存");
+    }
+
+    async function testAi() {
+      state.aiTestBusy = true;
+      const r = await api("/ai/test", {
+        method: "POST",
+        timeoutMs: 45000,
+        body: { baseUrl: state.aiCfg.baseUrl, apiKey: state.aiCfg.apiKey, model: state.aiCfg.model },
+      });
+      state.aiTestBusy = false;
+      if (!r.ok) return ElMessage.error(r.error || "连接测试失败");
+      ElMessage.success(r.message || "连接正常");
+    }
+
+    /* 「申请 Key」：在软件内置浏览器里打开对应厂商的 API Key 申请页。
+       桌面版走内置浏览器（webview，与平台登录同一个会话分区，厂商站点已登录时可直接建 Key）；
+       纯网页访问没有内置浏览器，退回系统浏览器新标签页。 */
+    function applyKeySite() {
+      const p = aiPreset.value;   /* computed 在 JS 里要取 .value，模板里才是直接 aiPreset.keyUrl */
+      if (!p || !p.keyUrl) {
+        return ElMessage.warning((p && p.name ? p.name : "该服务") + " 不需要申请 Key，按提示填写服务地址与模型名即可");
+      }
+      if (!state.isElectron) {
+        const w = window.open(p.keyUrl, "_blank", "noopener");
+        if (!w) return ElMessage.warning("浏览器拦截了新窗口，请允许弹出窗口后重试");
+        return ElMessage.success("已打开 " + p.name + " 的 API Key 申请页");
+      }
+      /* 切到内置浏览器页：顶部提示条告诉用户这是申请页，拿到 Key 后可一键回到设置 */
+      state.keyCtx = { name: p.name, url: p.keyUrl };
+      state.bUrl = p.keyUrl;
+      state.page = "browser";
+      /* webview 是 v-if 渲染的，等它挂载后再显式导航一次（:src 绑定之外的双保险） */
+      setTimeout(() => {
+        const w = bWebEl();
+        if (w) { try { w.loadURL(p.keyUrl); } catch {} }
+      }, 80);
+      ElMessage.success("已在内置浏览器打开「" + p.name + "」的 API Key 申请页");
+    }
+
+    /* 内置浏览器里申请完 Key：一键回到设置页的 AI 卡片 */
+    function backToAiSettings() {
+      state.keyCtx = null;
+      goAiSettings();
+    }
+    /* 关掉内置浏览器顶部的申请提示条 */
+    function closeKeyTip() { state.keyCtx = null; }
+
+    /* 「断开 AI」：清掉 Key 与服务地址，回到未接入状态 */
+    async function disconnectAi() {
+      try {
+        await ElMessageBox.confirm(
+          "将清除已保存的 API Key、服务地址与模型名，AI 功能回到「未接入」。之后可随时重新接入。",
+          "断开 AI",
+          { type: "warning", confirmButtonText: "断开", cancelButtonText: "取消" }
+        );
+      } catch { return; }
+      const r = await api("/ai/disconnect", { method: "POST" });
+      if (!r.ok) return apiError("断开 AI 失败", r);
+      await loadAiConfig();
+      /* 地址与模型按预设回填到界面（未落盘）：重新接入时只差一个 Key */
+      applyAiPreset(state.aiCfg.preset);
+      state.aiCfg.apiKey = "";
+      state.aiCfg.keyMasked = "";
+      state.aiCfg.connected = false;
+      state.aiCfg.ready = true;   /* 界面已回填地址与模型，只差 Key */
+      state.aiReady = false;
+      ElMessage.success("已断开 AI，AI 功能回到未接入状态");
+    }
+
+    function goAiSettings() {
+      state.aiVisible = false;
+      state.page = "settings";
+      /* 设置页有好几组卡片，AI 是第二组：跳转后滚到 AI 卡并闪一下，避免用户自己翻 */
+      Vue.nextTick(() => {
+        const el = document.getElementById("set-ai");
+        if (!el) return;
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.remove("set-flash");
+        void el.offsetWidth;            /* 强制重排，让同样的高亮能重复播 */
+        el.classList.add("set-flash");
+        setTimeout(() => el.classList.remove("set-flash"), 1800);
+      });
+    }
+
+    /* ---------------- 运行日志 ----------------
+     * 入口藏在「设置 → 关于」的版本号上：连点 5 次才出现「查看日志」。
+     * 这么设计是因为日志面板是给排查问题用的，不该占据日常界面。 */
+    const VERSION_TAP_MAX = 5;
+    let versionTaps = 0;
+    let versionTapTimer = null;
+    function tapVersion() {
+      versionTaps++;
+      if (versionTapTimer) clearTimeout(versionTapTimer);
+      /* 超过 3 秒的间隔视为重新开始计数，防止「今天点一下、明天点一下」慢慢凑满 */
+      versionTapTimer = setTimeout(() => { versionTaps = 0; state.logUnlockHint = false; }, 3000);
+      if (versionTaps >= VERSION_TAP_MAX) {
+        versionTaps = 0;
+        state.logUnlockHint = false;
+        if (!state.logUnlocked) {
+          state.logUnlocked = true;
+          ElMessage.success("已解锁运行日志");
+        }
+        openLogPanel();
+        return;
+      }
+      /* 快到 5 次时给个轻提示，用户才知道要继续点 */
+      state.logUnlockHint = versionTaps >= 3;
+    }
+
+    async function loadLogs() {
+      state.logBusy = true;
+      try {
+        const q = [];
+        if (state.logLevel) q.push("level=" + encodeURIComponent(state.logLevel));
+        if (state.logKeyword.trim()) q.push("keyword=" + encodeURIComponent(state.logKeyword.trim()));
+        q.push("limit=500");
+        const r = await api("/logs?" + q.join("&"));
+        if (!r.ok) {
+          ElMessage.error(r.error || "读取日志失败");
+          return;
+        }
+        state.logEntries = r.entries || [];
+        state.logStats = r.stats || null;
+      } finally {
+        state.logBusy = false;
+      }
+    }
+
+    function openLogPanel() {
+      state.logVisible = true;
+      loadLogs();
+    }
+
+    /* 自动刷新：开着就每 3 秒拉一次；关掉时定时器必须清掉，不能留在后台空转 */
+    let logTimer = null;
+    function toggleLogAuto() {
+      state.logAuto = !state.logAuto;
+      if (logTimer) { clearInterval(logTimer); logTimer = null; }
+      if (state.logAuto) {
+        logTimer = setInterval(() => { if (state.logVisible) loadLogs(); }, 3000);
+      }
+    }
+    function stopLogAuto() {
+      state.logAuto = false;
+      if (logTimer) { clearInterval(logTimer); logTimer = null; }
+    }
+
+    async function clearLogs() {
+      try {
+        await ElMessageBox.confirm("将清空全部运行日志（含磁盘文件），确定继续？", "清空日志", { type: "warning", confirmButtonText: "清空", cancelButtonText: "取消" });
+      } catch { return; }
+      const r = await api("/logs/clear", { method: "POST" });
+      if (!r.ok) return ElMessage.error(r.error || "清空失败");
+      ElMessage.success("日志已清空");
+      loadLogs();
+    }
+
+    async function copyLogText() {
+      const lines = state.logEntries.map((e) =>
+        `[${logTime(e.ts)}] ${logLevelText(e.level)} [${e.scope}] ${e.message}` + (e.extra ? " " + JSON.stringify(e.extra) : "")
+      ).join("\n");
+      if (!lines) return ElMessage.warning("当前没有可复制的日志");
+      try {
+        await navigator.clipboard.writeText(lines);
+        ElMessage.success("日志已复制到剪贴板");
+      } catch {
+        ElMessage.warning("复制失败，请手动选中复制");
+      }
+    }
+
+    function exportLogFile() {
+      /* 走服务端导出：保证拿到的就是磁盘上的原始记录，且包含当前筛选条件 */
+      const q = [];
+      if (state.logLevel) q.push("level=" + encodeURIComponent(state.logLevel));
+      if (state.logKeyword.trim()) q.push("keyword=" + encodeURIComponent(state.logKeyword.trim()));
+      q.push("limit=20000");
+      window.open("/api/logs/export?" + q.join("&"), "_blank");
+    }
+
+    async function copyLogDir() {
+      const dir = state.logStats && state.logStats.dir;
+      if (!dir) {
+        ElMessage.warning("日志目录还没获取到，请先打开一次日志");
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(dir);
+        ElMessage.success("日志目录已复制：" + dir);
+      } catch {
+        ElMessage.warning("复制失败，目录：" + dir);
+      }
+    }
+
+    /* 在系统文件管理器里打开日志目录（桌面版走主进程；浏览器里退化为复制路径） */
+    async function openLogDir() {
+      const dir = state.logStats && state.logStats.dir;
+      if (!dir) return ElMessage.warning("日志目录还没获取到，请先打开一次日志");
+      if (window.notefly && typeof window.notefly.openDir === "function") {
+        const r = await window.notefly.openDir(dir);
+        if (r && r.ok) return ElMessage.success("已打开日志目录");
+        return ElMessage.error((r && r.error) || "打开目录失败");
+      }
+      /* 浏览器版没有文件系统能力：把路径给用户复制 */
+      await copyLogDir();
+    }
+
+    /* 日志展示辅助 */
+    const logTime = (ts) => (ts ? new Date(ts).toLocaleString("zh-CN", { hour12: false }) : "-");
+    const logLevelText = (lv) => ({ debug: "调试", info: "信息", warn: "警告", error: "错误" }[lv] || lv || "");
+    const logExtraText = (extra) => {
+      try {
+        const s = typeof extra === "string" ? extra : JSON.stringify(extra);
+        return s.length > 300 ? s.slice(0, 300) + "…" : s;
+      } catch { return ""; }
+    };
+
+    /* 未接入 AI 时点击 AI 功能：统一弹这个提醒，点「接入 AI」直接跳设置页 */
+    let aiTipOpening = false;
+    function aiLockedTip() {
+      if (aiTipOpening) return;         /* 连点两下别叠两个弹窗 */
+      aiTipOpening = true;
+      ElMessageBox.confirm(
+        "这个功能要调用大模型，需要先接入 AI：在「设置 → AI 模型」填服务地址、API Key 与模型名即可。",
+        "AI 未接入",
+        {
+          type: "warning",
+          confirmButtonText: "接入 AI",
+          cancelButtonText: "稍后再说",
+          distinguishCancelAndClose: true,
+        }
+      )
+        .then(() => goAiSettings())
+        .catch(() => {})
+        .finally(() => { aiTipOpening = false; });
+    }
+
+    /* 去 AI 味弹窗里的「AI 深度改写」：未接入时复选框是禁用的，
+       点击落到外层 span 上，弹提醒而不是静默无反应 */
+    function onAiModeGate() {
+      if (!state.aiReady) aiLockedTip();
+    }
+
+    function onAiChip() {
+      if (!state.aiReady) return aiLockedTip();
+      goAiSettings();
+    }
+
+    async function openAiPanel() {
+      await loadAiConfig();
+      if (!state.aiReady) return aiLockedTip();   /* 状态可能刚变，按最新结果拦一次 */
+      const sel = currentSelection();
+      if (sel) state.aiForm.text = sel;
+      state.aiResult = "";
+      state.aiTitle = "";
+      state.aiVisible = true;
+    }
+
+    async function runAi() {
+      if (!state.aiReady) return aiLockedTip();
+      /* aiForm.action 是「润色改写」的子动作（润色/精简/扩写…），必须从 body 里摘出来，
+         否则会覆盖下面按 tab 算出的顶层 action —— 请求全部变成 polish 被服务端拒绝 */
+      const body = { ...state.aiForm };
+      const subAction = body.action || "polish";
+      delete body.action;
+      let action = "write";
+      if (state.aiTab === "write") {
+        action = "write";
+        if (!String(body.topic || "").trim()) return ElMessage.warning("先写清楚主题");
+      } else if (state.aiTab === "continue") {
+        action = "continue";
+        if (!String(body.before || "").trim()) body.before = state.ceForm.body || "";
+      } else if (state.aiTab === "deai") {
+        action = "deai";
+        body.text = body.text || currentSelection() || state.ceForm.body || "";
+        if (!String(body.text || "").trim()) return ElMessage.warning("没有可处理的内容");
+      } else {
+        action = "rewrite";
+        body.subAction = subAction;
+        body.text = body.text || currentSelection() || state.ceForm.body || "";
+        if (!String(body.text || "").trim()) return ElMessage.warning("没有可处理的内容");
+      }
+      state.aiBusy = true;
+      const r = await api("/ai/run", { method: "POST", timeoutMs: 300000, body: Object.assign({ action }, body) });
+      state.aiBusy = false;
+      if (!r.ok) return ElMessage.error(r.error || "生成失败");
+      state.aiResult = r.content || "";
+      state.aiTitle = action === "write" ? (r.title || "") : "";
+      const names = { write: "生成的文章", continue: "续写内容", rewrite: "改写结果", deai: "深度去 AI 味结果" };
+      state.aiResultTitle = names[action] || "生成结果";
+      state.aiResultMeta = (r.model || "") + (r.usage && r.usage.total_tokens ? " · " + r.usage.total_tokens + " tokens" : "");
+      if (!state.aiResult) return ElMessage.warning("模型没有返回内容");
+    }
+
+    /* 生成的文章直接填进「新建内容」编辑器（标题 + 正文），省掉复制粘贴 */
+    async function fillToContent() {
+      if (!state.aiResult) return;
+      const inEditor = state.page === "editor";
+      const hasBody = inEditor && String(state.ceForm.body || "").trim();
+      if (hasBody) {
+        try {
+          await ElMessageBox.confirm(
+            "编辑器里已经有内容，填充会用生成的文章覆盖正文" + (state.aiTitle ? "与标题" : "") + "。继续？",
+            "填充到新建内容",
+            { type: "warning", confirmButtonText: "覆盖填充", cancelButtonText: "取消" }
+          );
+        } catch { return; }
+      }
+      if (!inEditor) openContentEditor();   // 没打开编辑器就先开一个空白新建页
+      if (state.aiTitle) state.ceForm.title = state.aiTitle;
+      state.ceForm.body = state.aiResult;
+      state.ceDirty = true;
+      state.aiVisible = false;
+      ElMessage.success(state.aiTitle ? "已填入标题与正文，检查后保存" : "已填入正文，检查后保存");
+    }
+
+    function applyAiResult(mode) {
+      const text = state.aiResult;
+      if (!text) return;
+      if (mode === "replace") {
+        state.ceForm.body = text;
+      } else if (mode === "append") {
+        const cur = String(state.ceForm.body || "").replace(/\s+$/, "");
+        state.ceForm.body = cur ? cur + "\n\n" + text : text;
+      } else {
+        caretApply((cur, s, e) => {
+          const md = (cur && s > 0 && cur[s - 1] !== "\n" ? "\n\n" : "") + text + "\n";
+          return { text: cur.slice(0, s) + md + cur.slice(e), caret: s + md.length };
+        });
+      }
+      state.aiVisible = false;
+      ElMessage.success("已写入正文，记得保存");
+    }
+
+    async function copyAiResult() {
+      try {
+        await navigator.clipboard.writeText(state.aiResult);
+        ElMessage.success("已复制到剪贴板");
+      } catch {
+        ElMessage.warning("复制失败，请手动选中复制");
+      }
+    }
+
+    /* ================= 一键排版 / 去 AI 味 ================= */
+
+    /* 纯文本转义：两栏用 v-html 渲染（要显示 <mark> 标记），
+       所以没有标记的普通文本也必须先转义，否则正文里的 < > & 会被当标签解析 */
+    function escHtml(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    async function openTextTool(kind) {
+      await loadAiConfig().catch(() => {});
+      /* 模型没接上就把「AI 深度改写」关掉，避免带着无效开关跑请求 */
+      if (!state.aiReady) state.ttAiMode = false;
+      state.ttKind = kind;
+      state.ttBefore = state.ceForm.body || "";
+      state.ttAfter = "";
+      state.ttBeforeHtml = escHtml(state.ttBefore);
+      state.ttAfterHtml = "";
+      state.ttChanges = [];
+      state.ttScore = 0;
+      state.ttHitCount = 0;
+      state.ttMarked = false;
+      state.ttAiUsed = false;
+      state.ttAiError = "";
+      state.ttVisible = true;
+      await runTextTool();
+    }
+
+    async function runTextTool() {
+      if (!state.ttBefore) return;
+      state.ttBusy = true;                 // 整条链路都算忙：本地规则 + 可能的 AI 改写
+      state.ttAiUsed = false;
+      state.ttAiError = "";
+      try {
+        const path = state.ttKind === "format" ? "/text/format" : "/text/humanize";
+        const r = await api(path, { method: "POST", body: { text: state.ttBefore, level: state.ttLevel } });
+        if (!r.ok) { state.ttBusy = false; return ElMessage.error(r.error || "处理失败"); }
+        state.ttAfter = r.text || "";
+        state.ttChanges = r.changes || [];
+        /* 标记：服务端已把内容转义好，直接渲染；拿不到标记就退回纯文本 */
+        const m = r.marks || null;
+        state.ttBeforeHtml = (m && m.beforeHtml) || escHtml(state.ttBefore);
+        state.ttAfterHtml = (m && m.afterHtml) || escHtml(state.ttAfter);
+        state.ttMarked = !!(m && !m.skipped && (m.countBefore > 0 || m.countAfter > 0));
+
+        if (state.ttKind === "humanize") {
+          const a = await api("/text/analyze", { method: "POST", body: { text: state.ttBefore } });
+          if (a.ok) {
+            state.ttScore = a.score || 0;
+            state.ttHitCount = a.hitsCount || 0;
+          }
+          /* AI 深度改写：本地规则先做一遍「预清洗」，再把结果交给模型重写句子结构。
+             模型返回后重新算标记（本地规则的明细此时已不适用，索引也要重算）。 */
+          if (state.ttAiMode) {
+            const ai = await api("/ai/run", {
+              method: "POST",
+              timeoutMs: 300000,
+              body: { action: "deai", text: state.ttAfter, strength: state.ttLevel },
+            });
+            if (!ai.ok || !String(ai.content || "").trim()) {
+              state.ttAiError = ai.error || "模型没有返回内容";
+            } else {
+              const out = String(ai.content).trim();
+              state.ttAfter = out;
+              state.ttAiUsed = true;
+              const mk = await api("/text/marks", { method: "POST", body: { before: state.ttBefore, after: out } });
+              if (mk.ok) {
+                state.ttBeforeHtml = mk.beforeHtml || escHtml(state.ttBefore);
+                state.ttAfterHtml = mk.afterHtml || escHtml(out);
+                state.ttMarked = !mk.skipped && (mk.countBefore > 0 || mk.countAfter > 0);
+              } else {
+                state.ttBeforeHtml = escHtml(state.ttBefore);
+                state.ttAfterHtml = escHtml(out);
+                state.ttMarked = false;
+              }
+            }
+          }
+        }
+      } finally {
+        state.ttBusy = false;
+      }
+      if (state.ttAiError) {
+        ElMessage.warning("AI 深度改写失败，已保留本地规则结果：" + state.ttAiError);
+      }
+    }
+
+    function applyTextTool() {
+      if (!state.ttAfter) return;
+      /* 只回写纯文本：标记用的 <mark> 绝不能进正文（会被当成正文内容发出去） */
+      state.ceForm.body = state.ttAfter;
+      state.ttVisible = false;
+      ElMessage.success("已应用到正文，记得保存");
+    }
+
+    /* 本地绝对路径 -> 网页可访问地址：上传的图片存的是磁盘路径，浏览器加载不了，
+       预览/封面统一转成 /uploads/<文件名>（服务端把 data/uploads 挂成了静态目录） */
+    function toWebSrc(u) {
+      const s = String(u || "").trim();
+      if (!s) return "";
+      if (/^(https?:|data:|blob:|\/)/i.test(s)) return s;
+      const m = s.replace(/\\/g, "/").match(/\/uploads\/([^\/?#]+)([?#].*)?$/);
+      if (m) return "/uploads/" + encodeURIComponent(decodeURIComponent(m[1])) + (m[2] || "");
+      return s;
+    }
+    const bodyPreview = computed(() => {
+      const raw = state.ceForm.body || "";
+      let html;
+      try {
+        html = marked.parse(raw);
+      } catch {
+        return "<p>预览失败</p>";
+      }
+      /* marked 输出后统一处理 <img>，markdown 图片与内联 HTML 图片都能覆盖 */
+      try {
+        const box = document.createElement("div");
+        box.innerHTML = html;
+        box.querySelectorAll("img").forEach((img) => {
+          const web = toWebSrc(img.getAttribute("src"));
+          img.setAttribute("src", web);
+          img.setAttribute("loading", "lazy");
+          img.classList.add("md-img");
+        });
+        return box.innerHTML;
+      } catch {
+        return html;
+      }
+    });
+    const coverPreviewSrc = computed(() => toWebSrc(state.ceForm.cover));
+    /* 封面素材库选图：只列图片类素材，点选即填入封面 */
+    const coverImageOptions = computed(() => state.mediaFiles.filter((f) => f.isImage));
+    async function openCoverPicker() {
+      if (!state.mediaFiles.length) await loadMedia();
+      state.coverPickerVisible = true;
+    }
+    function pickCover(f) {
+      state.ceForm.cover = f.url;             // Web 路径，与数据目录解耦
+      state.coverPickerVisible = false;
+      ElMessage.success("已选择封面图：" + f.name);
+    }
+
+    const uploadFile = (file, apply) => {
+      if (!file) return;
+      if (file.size > 20 * 1024 * 1024) return ElMessage.error("文件不能超过 20MB");
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const r = await api("/upload", { method: "POST", body: { name: file.name, data: reader.result } });
+        if (r.ok && r.path) { apply(r.path); ElMessage.success("已上传: " + r.path); }
+        else ElMessage.error("上传失败: " + (r.error || ""));
+      };
+      reader.readAsDataURL(file);
+    };
+    const uploadCover = (e) => uploadFile(e.target.files[0], (p) => (state.ceForm.cover = p));
+    /* 光标处插入文本：全屏编辑器里插图/工具栏都按光标位置落，不再无脑追加到末尾 */
+    function caretApply(fn) {
+      const ta = document.querySelector(".ce-textarea");
+      const cur = state.ceForm.body || "";
+      if (!ta) { state.ceForm.body = fn(cur, cur.length, cur.length).text; return; }
+      const s = ta.selectionStart == null ? cur.length : ta.selectionStart;
+      const e = ta.selectionEnd == null ? s : ta.selectionEnd;
+      const r = fn(cur, s, e);
+      state.ceForm.body = r.text;
+      setTimeout(() => {
+        try { ta.focus(); ta.selectionStart = ta.selectionEnd = r.caret; } catch {}
+      }, 0);
+    }
+    /* Markdown 快捷操作：H2 / 加粗 / 引用 / 列表 / 代码块 / 链接 */
+    function mdAction(kind) {
+      caretApply((cur, s, e) => {
+        const sel = cur.slice(s, e);
+        const wrap = (pre, post, ph) => {
+          const inner = sel || ph || "";
+          return { text: cur.slice(0, s) + pre + inner + post + cur.slice(e), caret: s + pre.length + inner.length + post.length };
+        };
+        const linePrefix = (pre) => {
+          const ls = cur.lastIndexOf("\n", s - 1) + 1;
+          return { text: cur.slice(0, ls) + pre + cur.slice(ls), caret: s + pre.length };
+        };
+        if (kind === "h2") return wrap("## ", "", "小标题");
+        if (kind === "b") return wrap("**", "**", "加粗文字");
+        if (kind === "quote") return linePrefix("> ");
+        if (kind === "list") return linePrefix("- ");
+        if (kind === "code") return wrap("```\n", "\n```", "code");
+        if (kind === "link") return wrap("[", "](https://)", "链接文字");
+        return { text: cur, caret: s };
+      });
+    }
+    const bodyChars = computed(() => (state.ceForm.body || "").length);
+    const uploadBodyImage = (e) => {
+      const file = e.target.files[0];
+      uploadFile(file, (p) => {
+        caretApply((cur, s, en) => {
+          const md = (cur && s > 0 && cur[s - 1] !== "\n" ? "\n\n" : "") + "![](" + p + ")\n";
+          return { text: cur.slice(0, s) + md + cur.slice(en), caret: s + md.length };
+        });
+        e.target.value = "";
+      });
+    };
+    const insertImageToBody = () => document.getElementById("bodyImgInput").click();
+    async function importMd(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const r = await api("/contents/import", { method: "POST", body: { filename: file.name, body: reader.result } });
+        ElMessage.success("已导入: " + r.title);
+        loadAll();
+      };
+      reader.readAsText(file, "utf-8");
+      e.target.value = "";
+    }
+
+    /* 统一请求层：HTTP 非成功 / 断网 / 超时 / 非 JSON 都会返回 { ok:false, error }
+       所有写操作必须判断 ok，不允许“先提示成功再看结果”。 */
+    const api = NFApi.createApi({ fetchImpl: (url, init) => fetch(url, init) });
+    /* 统一的失败提示：把服务端原因带上，避免只显示“失败”两个字 */
+    function apiError(prefix, r) {
+      const msg = (r && r.error) || "未知错误";
+      ElMessage.error(prefix ? prefix + "：" + msg : msg);
+      return false;
+    }
+
+    /* 健康检查：只更新“引擎是否在线”等运行态，绝不覆盖用户正在编辑的设置草稿。
+       只有首次加载 / 主动保存成功后才刷新表单值。 */
+    async function checkEngine(force) {
+      try {
+        const cfg = await api("/config");
+        if (!cfg || !cfg.ok) { state.engineOk = false; return; }
+        state.engine = "rpa";
+        state.dataWarnings = cfg.dataWarnings || [];
+        if (force) {
+          state.cfg = {
+            ...state.cfg,
+            checkInterval: cfg.checkInterval || 30,   /* 漏掉它会让下拉框一直是空值 */
+            authorName: cfg.authorName || "",
+            authorBio: cfg.authorBio || "",
+            dataDir: cfg.dataDir || "",
+            dataDirIsDefault: cfg.dataDirIsDefault !== false,
+          };
+        }
+        const r = await fetch("/api/rpa/platforms");
+        state.engineOk = r.ok;
+        if (r.ok) {
+          /* 平台清单按 ID 存：任务里的 platform 是 ID（juejin/zhihu…），
+             不能拿中文名去匹配快捷入口 —— 这就是「打开平台」按钮失效的根因 */
+          try {
+            const j = await r.json();
+            state.rpaPlatforms = (j && (j.platforms || j)) || [];
+          } catch { state.rpaPlatforms = []; }
+        }
+      } catch { state.engineOk = false; }
+    }
+    async function loadAll() {
+      const [c, t, s] = await Promise.all([api("/contents"), api("/tasks"), api("/stats")]);
+      state.contents = c.contents || [];
+      state.tasks = t.tasks || [];
+      state.stats = s || {};
+      const a = await api("/accounts");
+      state.accounts = a.accounts || [];
+      state.accountsOutdated = a.outdated || 0;
+      /* 数据刷新后重排到点唤醒：新建的定时任务要能被及时唤醒 */
+      if (nextScheduledAt()) scheduleWake();
+    }
+
+    function calShift(n) {
+      let m = state.calMonth + n, y = state.calYear;
+      if (m < 1) { m = 12; y--; }
+      if (m > 12) { m = 1; y++; }
+      state.calYear = y; state.calMonth = m;
+    }
+    function calToday() {
+      const d = new Date();
+      state.calYear = d.getFullYear(); state.calMonth = d.getMonth() + 1;
+    }
+
+    /* ---------- 设置页：主题 / 浏览器管理 / 间隔 / API ---------- */
+    function toggleTheme(v) {
+      document.documentElement.classList.toggle("dark", !!v);
+      localStorage.setItem("nf-dark", v ? "1" : "0");
+    }
+    async function closeAllWindows() {
+      const r = await api("/rpa/closeall", { method: "POST" });
+      ElMessage.success("已关闭 " + (r.closed || 0) + " 个浏览器页面");
+    }
+    async function clearProfile() {
+      await ElMessageBox.confirm("将清空 RPA 浏览器的全部登录态，所有平台需要重新扫码登录。确定继续？", "危险操作", { type: "error", confirmButtonText: "确认清理", cancelButtonText: "取消" });
+      await api("/rpa/clearprofile", { method: "POST" });
+      ElMessage.warning("已清理，请到账号管理重新登录各平台");
+    }
+    async function saveInterval(v) {
+      const r = await api("/config", { method: "POST", body: { checkInterval: v } });
+      if (!r || !r.ok) return apiError("保存检查间隔失败", r);
+      state.cfg.checkInterval = v;
+      ElMessage.success("检查间隔已设为 " + (v >= 60 ? v / 60 + " 分钟" : v + " 秒"));
+    }
+    /* 作者署名：设置页与公众号签名区共用同一份数据源 */
+    async function saveAuthor() {
+      const r = await api("/config", { method: "POST", body: { authorName: state.cfg.authorName, authorBio: state.cfg.authorBio } });
+      if (!r || !r.ok) return apiError("保存作者信息失败", r);
+      ElMessage.success("作者信息已保存");
+    }
+    const gzhAuthor = computed(() => state.cfg.authorName || "爱吃桔子");
+    function copyApiAddr() {
+      navigator.clipboard.writeText("http://localhost:3210").then(() => ElMessage.success("地址已复制"));
+    }
+
+    /* ---------- 账号保活（MultiPost 同款三件套） ---------- */
+    async function loadKeepalive() {
+      const r = await api("/keepalive");
+      state.ka = {
+        enabled: r.keepalive.enabled,
+        intervalHours: r.keepalive.intervalHours,
+        lastRun: r.lastRun,
+        lastOnline: r.lastOnline,
+        lastTotal: r.lastTotal,
+        details: r.details || [],
+      };
+    }
+    async function saveKeepalive() {
+      await api("/keepalive/config", { method: "POST", body: { enabled: state.ka.enabled, intervalHours: state.ka.intervalHours } });
+      ElMessage.success("保活设置已保存");
+    }
+    async function runKeepaliveNow() {
+      state.kaBusy = true;
+      try {
+        const r = await api("/keepalive/run", { method: "POST" });
+        if (r.error) return ElMessage.warning(r.error);
+        state.ka.lastRun = r.lastRun;
+        state.ka.lastOnline = r.lastOnline;
+        state.ka.lastTotal = r.lastTotal;
+        state.ka.details = r.details || [];
+        const off = (r.details || []).filter((d) => d.online === false);
+        if (!off.length) {
+          ElMessage.success("巡检完成：" + r.lastOnline + " 个账号在线");
+        } else {
+          ElNotification({ title: "有账号掉线", message: off.map((d) => d.platform).join("、") + "（请到账号管理重新登录）", type: "warning", duration: 6000 });
+        }
+      } finally {
+        state.kaBusy = false;
+      }
+    }
+
+    /* 页面切换时按需加载 */
+    watch(() => state.page, (p) => {
+      if (p === "media") loadMedia();
+      if (p === "metrics") loadMetrics();
+    });
+
+    /* 编辑器脏检测：与打开时的基线快照比对，改回原样就不算脏 */
+    let ceBaseline = "";
+    watch(() => state.ceForm, () => {
+      if (state.page !== "editor") return;
+      state.ceDirty = JSON.stringify(state.ceForm) !== ceBaseline;
+    }, { deep: true });
+
+    async function doPublish(scheduled) {
+      if (state.pubBusy) return;                     // 防连点：同一时刻只允许一个发布请求
+      if (!state.pubContentId) return ElMessage.warning("请先选择内容");
+      const ids = state.pubAccounts.map((r) => r.id);
+      if (!ids.length) return ElMessage.warning("请至少勾选一个账号");
+      let scheduledAt = null;
+      if (scheduled) {
+        if (!state.pubTime) return ElMessage.warning("请选择定时时间");
+        scheduledAt = new Date(state.pubTime).toISOString();
+        if (new Date(scheduledAt).getTime() <= Date.now()) return ElMessage.warning("定时时间必须晚于当前时间");
+      }
+      /* 立即发布会直接对外公开，必须先确认 */
+      if (state.pubMode === "publish") {
+        try {
+          await ElMessageBox.confirm(
+            `将把「${pubContent.value.title || "无标题"}」自动发布到 ${ids.length} 个平台，文章会直接对外公开，确认继续吗？`,
+            "确认立即发布",
+            { type: "warning", confirmButtonText: "确认发布", cancelButtonText: "再检查一下" }
+          );
+        } catch {
+          return;
+        }
+      }
+      /* 发布前违禁词预检（蚁小二风控，可在设置页关闭）。
+         词库不可用时只提醒、不拦截发布（检测缺失不应阻塞流程），但必须说清是“未检测” */
+      if (state.checkWordsOnPublish) {
+        const cw = await api("/checkwords", { method: "POST", body: { text: (pubContent.value.title || "") + "\n" + (pubContent.value.body || "") } });
+        if (cw.ok && cw.status === "unavailable") {
+          ElMessage.warning(cw.note || "词库不可用，本次发布未做违禁词检测");
+        } else if (cw.ok && cw.hits && cw.hits.length) {
+          try {
+            await ElMessageBox.confirm(
+              "检出风险词：" + cw.hits.map((h) => `「${h.word}」`).join("、") + "。仍要继续发布吗？（可回内容库修改）",
+              "违禁词提醒",
+              { type: "warning", confirmButtonText: "仍要发布", cancelButtonText: "返回修改" }
+            );
+          } catch { return; }
+        }
+      }
+      state.pubBusy = true;
+      try {
+        const r = await api("/publish", { method: "POST", body: { contentId: state.pubContentId, accountIds: ids, scheduledAt, mode: state.pubMode } });
+        /* 任何 !ok（断网 status:0、超时、HTTP 400/401/413/500）都不能提示成功；
+           非 2xx 响应里若带了已持久化的任务，也照样取出来展示，避免用户以为没建成而重复提交 */
+        if (!r || !r.ok) {
+          const t = taskOf(r);
+          if (t && t.id) {
+            apiError("服务端返回异常，但任务已创建（未重复创建）：", { error: (r.error || "HTTP " + (r.status || 0)) + " · 任务状态：" + (statusName[t.status] || t.status) });
+            upsertTask(t);
+            state.page = "tasks";
+            await loadAll();
+            upsertTask(t);   /* 防 loadAll 竞态顶掉 */
+            scheduleTaskPoll();
+            return;
+          }
+          return apiError("发布失败", r);
+        }
+        const task = r.task;
+        /* 服务端 2xx 但没回任务：创建结果无法确认，按失败处理，绝不显示成功 */
+        if (!task || !task.id) {
+          return apiError("发布失败", { error: (r.error || "服务端未返回任务，创建结果未确认。请到发布记录核对，确认没有再重试，避免重复发布") });
+        }
+        upsertTask(task);
+        const targets = (task.lastStatus && task.lastStatus.targets) || [];
+        const status = r.taskStatus || task.status || "";
+        const summary = r.taskStatusReason || task.statusReason || "";
+
+        /* 能力提示：选了「立即发布」但目标平台的自动提交能力未验证时，如实告知 */
+        if (task.capabilityNotice) {
+          ElMessage.warning(task.capabilityNotice);
+        }
+
+        /* 以服务端归并结果为准：部分成功/结果未知都不能说“成功” */
+        if (status === "scheduled") {
+          ElMessage.success("已加入定时队列：" + fmt(task.scheduledAt) + " 自动执行");
+        } else if (status === "queued" || status === "creating") {
+          ElMessage.success("任务已创建，正在排队执行，可在发布记录中查看各平台进度");
+        } else if (status === "running") {
+          ElMessage.info("任务执行中，可在发布记录中查看各平台进度");
+        } else if (status === "done") {
+          ElMessage.success("已确认发布：" + targets.filter((t) => t.status === "success").map((t) => t.platform).join("、"));
+        } else if (status === "draft_ready") {
+          ElMessage.success("已存入各平台草稿箱（" + targets.length + " 个），检查无误后在发布记录里手动发布");
+        } else if (status === "partial") {
+          ElMessage.warning("部分成功：" + summary + "（详见发布记录，可只重试失败平台）");
+        } else if (status === "failed") {
+          ElMessage.error("发布失败：" + (task.error || "全部平台失败"));
+        } else if (status === "needs_manual") {
+          ElMessage.warning("有平台需要人工处理：" + summary);
+        } else if (status === "unknown") {
+          ElMessage.warning("结果待核验：" + summary + "。请到发布记录查看，核验前不要重复发布。");
+        } else {
+          ElMessage.info("任务已创建，状态：" + (statusName[status] || status || "未知"));
+        }
+        state.page = "tasks";
+        await loadAll();
+        /* loadAll 会用服务端列表整体替换，这里再补一次刚创建的任务，防止竞态把它顶掉 */
+        upsertTask(task);
+        scheduleTaskPoll();
+      } finally {
+        state.pubBusy = false;
+      }
+    }
+
+    /* 从任意响应里取业务任务：2xx 直接展开在顶层，非 2xx 包在 body 里 */
+    function taskOf(r) {
+      if (!r) return null;
+      if (r.task) return r.task;
+      if (r.body && r.body.task) return r.body.task;
+      return null;
+    }
+    function upsertTask(t) {
+      if (!t || !t.id) return;
+      const i = state.tasks.findIndex((x) => x.id === t.id);
+      if (i >= 0) state.tasks.splice(i, 1, { ...state.tasks[i], ...t });
+      else state.tasks.unshift(t);
+    }
+
+    /* ---------- 任务进度轮询：有进行中任务时每 2.5 秒同步一次，全部结束自动停止 ---------- */
+    const ACTIVE_TASK_STATUS = ["creating", "queued", "running", "publishing"];
+    let taskPollTimer = null;
+    let taskPollSeq = 0;        /* 请求序号：晚到的旧响应必须丢弃，不能覆盖更新的状态 */
+    let wakeTimer = null;       /* 未来定时任务到点唤醒 */
+
+    function hasActiveTask() {
+      return state.tasks.some((t) => ACTIVE_TASK_STATUS.includes(t.status) || (t.status === "scheduled" && t.scheduledAt && new Date(t.scheduledAt).getTime() <= Date.now()));
+    }
+    /* 下一个未来的定时任务时间（用于到点唤醒；没有则返回 null） */
+    function nextScheduledAt() {
+      const now = Date.now();
+      const list = state.tasks
+        .filter((t) => t.status === "scheduled" && t.scheduledAt)
+        .map((t) => new Date(t.scheduledAt).getTime())
+        .filter((ts) => ts > now)
+        .sort((a, b) => a - b);
+      return list.length ? list[0] : null;
+    }
+    async function pollTasksOnce() {
+      const seq = ++taskPollSeq;
+      if (window.__nfDebug) window.__nfDebug.pollCount++;
+      const r = await api("/tasks");
+      if (seq !== taskPollSeq) return;   // 已有更新的请求在路上，丢弃这次旧响应
+      if (r && r.ok && r.tasks) {
+        state.tasks = r.tasks;
+        /* 详情弹窗开着时同步总状态与目标列表，保证“提交单平台后头部状态正确” */
+        if (state.taskVisible && state.curTask) {
+          const cur = r.tasks.find((x) => x.id === state.curTask.id);
+          if (cur) Object.assign(state.curTask, cur);
+          if (state.curTask.groupId) refreshTaskTargets();
+        }
+      }
+      scheduleTaskPoll();
+      scheduleWake();
+    }
+    function scheduleTaskPoll() {
+      if (taskPollTimer) return;
+      if (!hasActiveTask()) return;
+      taskPollTimer = setTimeout(async () => {
+        taskPollTimer = null;
+        if (document.hidden) { scheduleTaskPoll(); return; } // 后台标签页不请求，回来时立即补一次
+        await pollTasksOnce();
+      }, 2500);
+    }
+    /* 未来定时任务到点唤醒：到点后服务端开始执行，前端必须同步到进度 */
+    function scheduleWake() {
+      if (wakeTimer) { clearTimeout(wakeTimer); wakeTimer = null; }
+      const ts = nextScheduledAt();
+      if (!ts) return;
+      if (window.__nfDebug) window.__nfDebug.wakeScheduled = (window.__nfDebug.wakeScheduled || 0) + 1;
+      const delay = Math.min(Math.max(ts - Date.now(), 500), 24 * 60 * 60 * 1000);
+      wakeTimer = setTimeout(async () => {
+        wakeTimer = null;
+        if (window.__nfDebug) window.__nfDebug.wakeFired = (window.__nfDebug.wakeFired || 0) + 1;
+        await pollTasksOnce();
+        scheduleWake();
+      }, delay);
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && (hasActiveTask() || nextScheduledAt())) pollTasksOnce();
+    });
+
+    function openContentEditor(id) {
+      const c = state.contents.find((x) => x.id === id) || { type: "ARTICLE", title: "", digest: "", body: "", cover: "", tags: [] };
+      /* cover 归一成 Web 路径：历史数据里存过绝对磁盘路径，重开+保存一次即自愈 */
+      state.ceForm = { id: c.id, type: c.type, title: c.title, digest: c.digest || "", body: c.body || "", cover: toWebSrc(c.cover || ""), media: c.video || c.audio || "", tagsStr: (c.tags || []).join(","), gzhTheme: c.gzhTheme || "", draft: !!c.draft };
+      state.ceMode = "split";
+      state.ceDirty = false;          // 打开时不算脏，避免“什么都没改也提示未保存”
+      state.ceEditing = !!c.id;
+      state.gzhHtml = "";             // 上一次的渲染产物不能带到这一篇
+      ceBaseline = JSON.stringify(state.ceForm);
+      if (state.page !== "editor") state.ceBack = state.page; // 记住从哪进来的，保存/取消后回到原页
+      state.page = "editor";
+      /* 公众号文章：进编辑器就渲染一次，避免看到空白预览 */
+      if (state.ceForm.gzhTheme) refreshGzhPreview();
+    }
+
+    /* ---------------- 公众号排版 ---------------- */
+    /* 模板清单：进页面拉一次即可，之后都是本地状态 */
+    async function loadGzhTemplates() {
+      if (state.gzhTemplates.length) return;
+      const r = await api("/gzh/templates");
+      if (!r.ok) return;
+      state.gzhTemplates = r.templates || [];
+      if (!state.gzhPicked && state.gzhTemplates.length) state.gzhPicked = state.gzhTemplates[0].id;
+    }
+
+    /* 新建入口的两条路径：普通文章（与原来完全一致）/ 微信公众号文章（先选模板） */
+    async function onNewContentMode(cmd) {
+      if (cmd !== "wechat") return;         // 普通文章走主按钮，行为不变
+      await loadGzhTemplates();
+      if (!state.gzhTemplates.length) {
+        ElMessage.error("公众号模板清单加载失败，请检查服务是否正常");
+        return;
+      }
+      state.gzhPicked = state.gzhTemplates[0].id;
+      state.gzhPickerVisible = true;
+    }
+    function confirmGzhTemplate() {
+      if (!state.gzhPicked) return;
+      state.gzhPickerVisible = false;
+      openContentEditor();
+      /* 建好空表单后再挂模板，触发预览渲染 */
+      state.ceForm.gzhTheme = state.gzhPicked;
+      state.ceDirty = false;
+      ceBaseline = JSON.stringify(state.ceForm);
+      refreshGzhPreview();
+    }
+
+    const gzhThemeName = (id) => {
+      const t = state.gzhTemplates.find((x) => x.id === id);
+      return t ? t.name : id;
+    };
+    const gzhThemeScene = computed(() => {
+      const t = state.gzhTemplates.find((x) => x.id === state.ceForm.gzhTheme);
+      return t ? t.scene : "";
+    });
+
+    /* 渲染正文 → 公众号内联样式 HTML（服务端渲染，前端只负责展示与导出） */
+    let gzhTimer = null;
+    let gzhSeq = 0;
+    async function refreshGzhPreview() {
+      const body = String(state.ceForm.body || "");
+      const themeId = state.ceForm.gzhTheme;
+      if (!themeId || !body.trim()) {
+        state.gzhHtml = "";
+        state.gzhWarn = "";
+        return;
+      }
+      const seq = ++gzhSeq;
+      state.gzhLoading = true;
+      const r = await api("/gzh/render", {
+        method: "POST",
+        body: { markdown: body, themeId, title: state.ceForm.title, cover: state.ceForm.cover, authorName: gzhAuthor.value },
+      });
+      if (seq !== gzhSeq) return;             // 有更新的请求，丢弃过期结果
+      state.gzhLoading = false;
+      if (!r.ok) {
+        state.gzhHtml = "";
+        state.gzhWarn = r.error || "排版失败";
+        return;
+      }
+      state.gzhHtml = r.html || "";
+      state.gzhWarn = (r.errors && r.errors.length) ? r.errors[0] : ((r.warnings && r.warnings.length) ? r.warnings[0] : "");
+    }
+    /* 正文改动后自动刷新（防抖），只对公众号形态生效 */
+    watch(() => state.ceForm.body, () => {
+      if (!state.ceForm.gzhTheme) return;
+      if (gzhTimer) clearTimeout(gzhTimer);
+      gzhTimer = setTimeout(() => { refreshGzhPreview(); }, 700);
+    });
+    watch(() => state.ceForm.gzhTheme, () => {
+      if (state.ceForm.gzhTheme) refreshGzhPreview();
+      else { state.gzhHtml = ""; state.gzhWarn = ""; }
+    });
+
+    function onGzhThemeChange() {
+      state.ceDirty = true;
+    }
+
+    /* 复制到公众号：把渲染后的富文本写进剪贴板，粘到公众号编辑器样式不丢 */
+    async function copyGzhHtml() {
+      if (!state.gzhHtml) return;
+      try {
+        /* 用离屏容器承载富文本，浏览器复制的是渲染后的 DOM（含内联样式） */
+        const box = document.createElement("div");
+        box.style.position = "fixed";
+        box.style.left = "-9999px";
+        box.style.top = "0";
+        box.style.width = "677px";
+        box.innerHTML = state.gzhHtml;
+        document.body.appendChild(box);
+        const range = document.createRange();
+        range.selectNodeContents(box);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        const ok = document.execCommand("copy");
+        sel.removeAllRanges();
+        document.body.removeChild(box);
+        if (!ok) throw new Error("copy failed");
+        ElMessage.success("已复制，粘到公众号编辑器即可保留样式");
+      } catch (e) {
+        ElMessage.error("复制失败，请改用「导出 HTML」");
+      }
+    }
+
+    /* 导出 HTML：生成公众号正文片段（不含文档外壳，公众号只接受正文片段） */
+    function exportGzhHtml() {
+      if (!state.gzhHtml) return;
+      const title = (state.ceForm.title || "未命名").replace(/[\\/:*?"<>|]/g, "_");
+      const blob = new Blob([state.gzhHtml], { type: "text/html;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = title + "_公众号排版.html";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      ElMessage.success("已导出 HTML，可直接粘进公众号编辑器");
+    }
+    /* 离开编辑器：有未保存修改时先确认，避免误点菜单丢稿 */
+    async function leaveEditor(force) {
+      /* 封面/摘要也算内容：只传了图没写字的草稿，离开时同样要拦 */
+      const dirty = state.ceDirty && ((state.ceForm.title || "").trim() || (state.ceForm.body || "").trim() || (state.ceForm.cover || "").trim() || (state.ceForm.digest || "").trim());
+      if (!force && dirty) {
+        try {
+          await ElMessageBox.confirm("当前内容尚未保存，离开将丢失编辑中的内容。", "确认离开？", {
+            type: "warning", confirmButtonText: "离开", cancelButtonText: "继续编辑",
+          });
+        } catch { return false; }
+      }
+      state.page = state.ceBack || "contents";
+      state.ceDirty = false;
+      return true;
+    }
+    const closeEditor = () => leaveEditor(false);
+    async function onMenuSelect(k) {
+      if (state.page === "editor" && k !== "editor") {
+        const ok = await leaveEditor(false);
+        if (!ok) return;
+      }
+      /* 离开内置浏览器时收掉「申请 Key」提示条，下次进来是干净状态 */
+      if (k !== "browser") state.keyCtx = null;
+      state.page = k;
+    }
+    /* 保存内容：只有服务端确认落盘才提示“已保存”并离开编辑器。
+       失败时保留当前页面与正文，错误原因原样带出。 */
+    async function saveContent() {
+      if (state.ceSaving) return;                 // 防连点：同一份内容不并发提交
+      const f = state.ceForm || {};
+      state.ceSaving = true;
+      try {
+        f.draft = false;                          // 点「保存」= 定稿，清除草稿标记
+        const res = await NFContent.save(api, f);
+        if (!res.ok) {
+          /* 关键：不跳页、不清空、不提示成功 */
+          ElMessage.error("保存失败：" + (res.error || "服务未确认写入") + "（内容仍在编辑器里，可重试或复制备份）");
+          return;
+        }
+        /* 新建成功后回填 id，后续保存变更新，避免重复插入 */
+        f.id = res.content.id;
+        state.ceDirty = false;
+        ElMessage.success(res.created ? "已保存到内容库" : "已保存");
+        state.page = state.ceBack || "contents";
+        loadAll();
+      } finally {
+        state.ceSaving = false;
+      }
+    }
+    /* 保存草稿：只落库、不清草稿标记，成功后留在编辑器继续写 */
+    async function saveDraft() {
+      if (state.ceSaving) return;
+      const f = state.ceForm || {};
+      state.ceSaving = true;
+      try {
+        f.draft = true;
+        const res = await NFContent.save(api, f);
+        if (!res.ok) {
+          ElMessage.error("草稿保存失败：" + (res.error || "服务未确认写入") + "（内容仍在编辑器里，可重试）");
+          return;
+        }
+        f.id = res.content.id;                    // 回填 id：下一次保存变更新
+        state.ceDirty = false;
+        state.ceEditing = true;
+        ElMessage.success("草稿已保存，可以继续编辑");
+        /* 必须刷新内容列表：否则取消后重新打开时，过期副本会把刚存的封面等字段
+           回填成旧值（bug：存草稿→重开→封面消失→再保存把空 cover 写回库） */
+        await loadAll();
+      } finally {
+        state.ceSaving = false;
+      }
+    }
+    async function delContent(id) {
+      try {
+        await ElMessageBox.confirm("确定删除该内容？", "提示", { type: "warning" });
+      } catch { return; }
+      const r = await api("/contents/" + id, { method: "DELETE" });
+      if (!r.ok) return apiError("删除失败", r);
+      ElMessage.success("已删除");
+      loadAll();
+    }
+
+    async function rpaLogin(platform) {
+      const r = await api("/rpa/login", { method: "POST", body: { platform } });
+      if (r.error) return ElMessage.error("打开登录页失败: " + r.error);
+      ElMessage.success("已打开独立登录窗口，登录完回来点「检查」");
+    }
+    /* 账号管理 → 登录：直接在软件内置浏览器里登录，登录态回传给发布引擎 */
+    async function startLogin(row) {
+      const label = row.displayName || row.alias || row.id;
+      if (!state.isElectron || !window.notefly) {
+        return rpaLogin(row.id); // 纯浏览器访问读不到跨域 cookie，退回独立窗口
+      }
+      const url = row.loginUrl || "";
+      if (!url) return ElMessage.error("该平台未配置登录地址");
+      state.loginCtx = { id: row.id, label, url };
+      state.bUrl = url;
+      state.page = "browser";
+      /* 等 webview 挂载后再显式导航（:src 绑定之外的双保险） */
+      setTimeout(() => {
+        const w = bWebEl();
+        if (w) { try { w.loadURL(url); } catch {} }
+      }, 80);
+      ElMessage.info("已在内置浏览器打开「" + label + "」登录页");
+    }
+    async function finishLogin() {
+      const c = state.loginCtx;
+      if (!c) return;
+      state.loginBusy = true;
+      try {
+        /* 桌面版：发布引擎直接复用内置浏览器这份会话，无需复制 cookie，只做校验 */
+        if (state.isElectron) {
+          ElMessage.info("正在确认登录状态…");
+          const ck = await api("/rpa/checklogin", { method: "POST", body: { platform: c.id } });
+          const a = state.accounts.find((x) => x.id === c.id);
+          if (ck.ok) { if (a) { a.isLoggedIn = !!ck.loggedIn; a.stale = false; } }
+          if (ck.ok && ck.loggedIn) {
+            ElMessage.success("「" + c.label + "」登录成功，发布引擎已就绪");
+            state.loginCtx = null;
+            state.page = "accounts";
+            /* 检查通过后关掉登录页：清理引擎残留页面并复位内置浏览器 */
+            await closeAllWindows();
+            state.bUrl = "https://juejin.cn/";
+            loadAll();
+          } else if (ck.ok) {
+            ElMessage.warning("没有检测到登录状态 —— 请确认页面上已经是登录后的样子（不是登录/扫码框），再点一次「完成登录」");
+          } else {
+            ElMessage.warning("检查未完成：" + (ck.error || ""));
+          }
+          return;
+        }
+
+        /* 纯浏览器访问：读不到跨域 cookie，走导出导入 */
+        const w = bWebEl();
+        if (!w) return ElMessage.error("内置浏览器未就绪");
+        const url = (() => { try { return w.getURL() || c.url; } catch { return c.url; } })();
+        const cookies = await window.notefly.getCookies(w.getWebContentsId());
+        let ls = [];
+        try {
+          const raw = await w.executeJavaScript(
+            "JSON.stringify(Object.keys(localStorage).map(k => ({ name: k, value: localStorage.getItem(k) })))",
+            true
+          );
+          ls = JSON.parse(raw || "[]");
+        } catch {}
+        if (!cookies || !cookies.length) {
+          ElMessage.warning("没读到登录信息，请先在页面里完成扫码/账号登录");
+          return;
+        }
+        /* 桌面版：发布引擎与内置浏览器共用同一个会话分区，登录态零复制，无需导出 cookie；
+         * 纯浏览器访问时才需要导出登录态给引擎的独立浏览器用（降级方案） */
+        if (!state.isElectron) {
+          const r = await api("/rpa/import-state", { method: "POST", body: { platform: c.id, url, cookies, localStorage: ls } });
+          if (r.error) throw new Error(r.error);
+          ElMessage.success("登录态已保存（" + (r.cookieCount || 0) + " 个 cookie），正在校验…");
+        } else {
+          ElMessage.info("正在校验登录状态…");
+        }
+        const ck = await api("/rpa/checklogin", { method: "POST", body: { platform: c.id } });
+        const a = state.accounts.find((x) => x.id === c.id);
+        if (ck.ok && a) {
+          a.isLoggedIn = !!ck.loggedIn;
+          a.stale = false;
+          a.checkedAt = ck.checkedAt || new Date().toISOString();
+          a.checkMethod = ck.method || "";
+        }
+        if (ck.ok && ck.loggedIn) {
+          ElMessage.success("「" + c.label + "」登录成功（" + (ck.method === "api" ? "平台接口已确认身份" : "页面状态校验通过") + "），发布引擎已就绪");
+          state.loginCtx = null;
+          state.page = "accounts";
+          /* 检查通过后关掉登录页：关掉引擎侧残留页面，清空内置浏览器地址栏 */
+          await closeAllWindows();
+          state.bUrl = "https://juejin.cn/";
+          loadAll();
+        } else if (ck.ok) {
+          ElMessage.warning("登录态已保存，但未检测到登录状态 —— 请确认页面里已完成登录，再点一次「完成登录」");
+        } else {
+          ElMessage.warning("登录态已保存，自动检查未完成：" + (ck.error || ""));
+          state.loginCtx = null;
+          state.page = "accounts";
+        }
+      } catch (e) {
+        ElMessage.error("同步登录态失败: " + (e.message || e));
+      } finally {
+        state.loginBusy = false;
+      }
+    }
+    function cancelLogin() {
+      state.loginCtx = null;
+      state.page = "accounts";
+    }
+    async function rpaCheck(platform) {
+      const r = await api("/rpa/checklogin", { method: "POST", body: { platform } });
+      const a = state.accounts.find((x) => x.id === platform);
+      if (a) {
+        a.isLoggedIn = r.ok ? r.loggedIn : false;
+        a.stale = false;
+        a.checkedAt = r.checkedAt || new Date().toISOString();
+        a.checkMethod = r.method || "";
+      }
+      if (r.ok && r.loggedIn) ElMessage.success("已登录（" + (r.method === "api" ? "平台接口校验" : "页面校验") + "）");
+      else ElMessage.warning(r.ok ? "未登录 —— 请点「登录」重新扫码" : "检查失败: " + (r.error || ""));
+    }
+    /* 状态副标题：登录态 + 上次校验时间 + 判定方式 */
+    function checkHint(row) {
+      if (row.isLoggedIn !== true && row.isLoggedIn !== false) return "尚未检查登录态";
+      const t = row.checkedAt ? new Date(row.checkedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "";
+      const m = row.checkMethod === "api" ? "接口校验" : row.checkMethod === "dom" ? "页面校验" : "";
+      if (row.isLoggedIn === false) return "需要重新登录" + (t ? " · " + t + " 校验" : "");
+      /* 结果已过期：说清楚是「上次查的结果」，别让人当成现在还登着 */
+      if (row.stale) {
+        return ["上次检查为已登录，结果已过期", t && m ? `${t} ${m}` : t || "", "建议点「检查」重新确认"]
+          .filter(Boolean).join(" · ");
+      }
+      return ["登录态有效", t && m ? `${t} ${m}` : t || ""].filter(Boolean).join(" · ");
+    }
+    async function refreshAccount(id) {
+      await api(`/accounts/${id}/refresh`, { method: "POST" });
+      ElMessage.success("已刷新");
+      loadAll();
+    }
+    function openAccountMeta(a) {
+      state.amForm = { id: a.id, alias: a.alias || "", group: a.group || "默认分组" };
+      state.amVisible = true;
+    }
+    async function saveAccountMeta() {
+      await api(`/accounts/${state.amForm.id}/meta`, { method: "POST", body: { alias: state.amForm.alias, group: state.amForm.group } });
+      state.amVisible = false;
+      loadAll();
+    }
+
+    async function viewTask(id) {
+      state.curTask = state.tasks.find((t) => t.id === id);
+      state.taskVisible = true;
+      await refreshTaskTargets();
+      scheduleTaskPoll();   // 详情打开期间若任务还在执行，持续同步进度
+      const draft = {};
+      for (const t of state.taskTargets) {
+        draft[t.accountId] = { reads: 0, likes: 0, comments: 0, shares: 0, ...((state.curTask.metrics || {})[t.accountId] || {}) };
+      }
+      state.metricsDraft = draft;
+    }
+    async function refreshTaskTargets() {
+      const t = state.curTask;
+      if (!t || !t.groupId) return (state.taskTargets = []);
+      const st = await api(`/tasks/${t.groupId}/status`);
+      if (!st.ok && !st.expired) {
+        state.taskTargets = (t.lastStatus && t.lastStatus.targets) || [];
+        return;
+      }
+      state.taskTargets = st.expired ? (t.lastStatus && t.lastStatus.targets) || [] : st.targets || [];
+      const local = state.tasks.find((x) => x.id === t.id);
+      if (local && state.taskTargets.length) local.lastStatus = { targets: state.taskTargets };
+    }
+    /* 目标操作后同步父任务状态：服务端回传完整任务，本地与弹窗一起更新 */
+    function applyTaskFromResponse(r) {
+      const t = taskOf(r);
+      if (!t || !t.id) return;
+      const local = state.tasks.find((x) => x.id === t.id);
+      if (local) Object.assign(local, t);
+      if (state.curTask && state.curTask.id === t.id) Object.assign(state.curTask, t);
+      if (t.lastStatus && t.lastStatus.targets) state.taskTargets = t.lastStatus.targets;
+      scheduleTaskPoll();
+    }
+    async function submitTarget(accountId) {
+      const r = await api(`/tasks/${state.curTask.groupId}/targets/${accountId}/submit`, { method: "POST" });
+      if (!r.ok) return apiError("提交被拒绝", r);
+      applyTaskFromResponse(r);
+      const st = r.taskStatus || (r.task && r.task.status) || "";
+      if (st === "partial") ElMessage.warning("该平台已提交，但任务仍为部分成功（还有失败或待确认平台）");
+      else if (st === "done") ElMessage.success("全部平台已确认发布");
+      else if (st === "in_review") ElMessage.info("已提交，等待平台受理/审核；结果可在任务详情核验或人工确认");
+      else ElMessage.info("已提交，任务状态：" + (statusName[st] || st || "处理中"));
+      refreshTaskTargets();
+      loadAll();
+    }
+    async function retryTarget(accountId) {
+      const tg = state.taskTargets.find((x) => x.accountId === accountId);
+      /* 与服务端保持同一条规则：unknown 必须先核验，不能直接重填 */
+      if (tg && (tg.status === "unknown" || tg.status === "submitting")) {
+        return ElMessage.warning("该平台提交结果待核验，不能直接重填。请先「核验」或打开平台确认");
+      }
+      const r = await api(`/tasks/${state.curTask.groupId}/targets/${accountId}/retry`, { method: "POST" });
+      if (!r.ok) return apiError("重试失败", r);
+      applyTaskFromResponse(r);
+      const st = r.taskStatus || (r.task && r.task.status) || "";
+      ElMessage.success("已重新填入该平台（任务状态：" + (statusName[st] || st) + "）");
+      refreshTaskTargets();
+      loadAll();
+    }
+    /* unknown 目标的三步处理：打开平台人工查看 → 核验 → 登记结果（记录为人工确认）
+       平台地址一律按 platform ID 查平台配置（composition/创作后台优先，回退平台首页），
+       绝不用中文名去匹配快捷入口 —— 名称只用于显示。 */
+    function platformConfig(platformId) {
+      return state.rpaPlatforms.find((p) => p.id === platformId || p.platform === platformId) || null;
+    }
+    async function openTargetPlatform(accountId, kind = "compose") {
+      const tg = state.taskTargets.find((x) => x.accountId === accountId);
+      const platformId = tg ? tg.platform : accountId;
+      const cfg = platformConfig(platformId);
+      if (!cfg) {
+        /* 平台清单没加载出来（引擎切换后未刷新）时，先拉一次再试 */
+        await checkEngine(true);
+        const again = platformConfig(platformId);
+        if (!again) return ElMessage.warning(`未收录「${platformId}」的平台地址，请到平台后台手动处理`);
+        return openTargetPlatform(accountId, kind);
+      }
+      const url = kind === "home" ? (cfg.loginUrl || cfg.composeUrl) : (cfg.composeUrl || cfg.loginUrl);
+      if (!url) return ElMessage.warning(`未收录「${cfg.label || platformId}」的平台地址，请到平台后台手动处理`);
+      state.page = "browser";
+      bOpen(url);
+    }
+    async function verifyTarget(accountId) {
+      const r = await api(`/tasks/${state.curTask.groupId}/targets/${accountId}/verify`, { method: "POST", body: { action: "check" } });
+      if (!r.ok) return apiError("核验失败", r);
+      if (r.target) {
+        const tg = state.taskTargets.find((x) => x.accountId === accountId);
+        if (tg) Object.assign(tg, r.target);
+      }
+      ElMessage({ type: r.handleAlive ? "info" : "warning", message: r.hint || "核验完成", duration: 6000 });
+    }
+    async function confirmTarget(accountId, ok) {
+      const tg = state.taskTargets.find((x) => x.accountId === accountId);
+      const label = tg ? tg.platform : "该平台";
+      try {
+        await ElMessageBox.confirm(
+          ok
+            ? `确认「${label}」已发布成功？该结果会以“人工确认”记录，不会冒充平台自动核验。`
+            : `登记「${label}」发布失败？登记后可正常重试。`,
+          ok ? "人工确认发布" : "登记失败",
+          { type: ok ? "success" : "warning", confirmButtonText: ok ? "确认已发布" : "登记失败", cancelButtonText: "取消" }
+        );
+      } catch { return; }
+      const r = await api(`/tasks/${state.curTask.groupId}/targets/${accountId}/verify`, { method: "POST", body: { action: ok ? "confirm_success" : "confirm_failed" } });
+      if (!r.ok) return apiError("登记失败", r);
+      applyTaskFromResponse(r);
+      const st = r.taskStatus || "";
+      if (ok) ElMessage.success("已人工确认发布（任务状态：" + (statusName[st] || st) + "）");
+      else ElMessage.warning("已登记为失败，可重试");
+      refreshTaskTargets();
+      loadAll();
+    }
+    async function submitAll() {
+      if (state.submitBusy) return;
+      state.submitBusy = true;
+      try {
+        const r = await api(`/tasks/${state.curTask.groupId}/submit`, { method: "POST" });
+        if (!r.ok) return apiError("提交被拒绝", r);
+        applyTaskFromResponse(r);
+        const st = r.taskStatus || (r.task && r.task.status) || "";
+        if (st === "partial") ElMessage.warning("已提交，结果为部分成功：" + (r.taskError || "请查看各平台状态"));
+        else if (st === "failed") ElMessage.error("提交后全部失败：" + (r.taskError || ""));
+        else if (st === "done") ElMessage.success("全部平台已确认发布");
+        else ElMessage.info("提交完成，任务状态：" + (statusName[st] || st));
+        refreshTaskTargets();
+        loadAll();
+      } finally {
+        state.submitBusy = false;
+      }
+    }
+
+    /* ---------- 数据存放位置 ----------
+       切换目录由服务端完成四件事：迁移数据 → 写指针 → 重载内存态 → 重置 RPA 浏览器上下文。
+       指针写失败时服务端会直接返回错误并保持原状，这里不做任何本地兜底。 */
+    async function switchDataDir() {
+      const dir = (state.dataDirInput || "").trim();
+      if (!dir) return ElMessage.warning("请先填写新的存放目录");
+      state.dataDirBusy = true;
+      try {
+        const r = await api("/data-dir", { method: "POST", body: { dir, migrate: true } });
+        if (!r || !r.ok) return apiError("切换数据目录失败", r);
+        const skipped = (r.skipped || []).length;
+        ElMessage.success("数据已迁移到新目录" + (skipped ? "（有 " + skipped + " 项被占用未能搬走）" : ""));
+        state.dataDirInput = "";
+        state.cfg.dataDir = r.dir || state.cfg.dataDir;
+        state.cfg.dataDirIsDefault = false;
+        await checkEngine(true);
+        loadAll();
+      } finally {
+        state.dataDirBusy = false;
+      }
+    }
+    async function resetDataDir() {
+      await ElMessageBox.confirm("将把数据切回应用内的默认 data/ 目录，并把当前目录的数据一并搬回。原位置的数据会保留不动。确定继续？", "恢复默认位置", { type: "warning", confirmButtonText: "确认恢复", cancelButtonText: "取消" });
+      state.dataDirBusy = true;
+      try {
+        const r = await api("/data-dir/reset", { method: "POST" });
+        if (!r || !r.ok) return apiError("恢复默认位置失败", r);
+        ElMessage.success("已恢复默认位置");
+        state.dataDirInput = "";
+        await checkEngine(true);
+        loadAll();
+      } finally {
+        state.dataDirBusy = false;
+      }
+    }
+
+    /* 窄屏适配：侧边栏宽度是 el-aside 的内联样式，CSS 覆盖不了，这里用绑定控制。
+       桌面版窗口最小 1024px，这套规则主要照顾浏览器里窄窗口打开的情况。 */
+    const winW = ref(typeof window !== "undefined" ? window.innerWidth : 1440);
+    const onWinResize = () => { winW.value = window.innerWidth; };
+    if (typeof window !== "undefined") window.addEventListener("resize", onWinResize);
+    const isRail = computed(() => winW.value < 780);
+    const sideW = computed(() => (winW.value < 780 ? "58px" : winW.value < 1120 ? "196px" : "228px"));
+
+    onMounted(async () => {
+      toggleTheme(state.themeDark); // 应用持久化主题
+      await checkEngine(true); await loadAll();
+      /* 初始化就启动同步：已有活跃任务或未来定时任务时必须立刻进入轮询/到点唤醒，
+         否则后台已经开始执行，前台仍停在“定时待发” */
+      if (hasActiveTask() || nextScheduledAt()) pollTasksOnce();
+      await loadKeepalive();
+      await loadAiConfig();  /* AI 模型配置（拉不到也不影响其它功能） */
+      /* 数据文件损坏等启动告警：必须让用户看到，不能静默当空库 */
+      if (state.dataWarnings && state.dataWarnings.length) {
+        ElNotification({
+          title: "数据文件异常",
+          message: state.dataWarnings.map((w) => w.message).join("；") + "。损坏副本已保留在 data 目录，可人工恢复。",
+          type: "error",
+          duration: 0,
+        });
+      }
+      /* 上轮巡检有掉线账号 → 启动时提醒（只报「确认未登录」的；
+         online 为 null 的是待检查/已作废的旧结论，不能算掉线） */
+      const off = state.ka.details.filter((d) => d.online === false);
+      if (state.ka.lastRun && off.length) {
+        ElNotification({ title: "账号掉线提醒", message: off.map((d) => d.platform).join("、") + "（共 " + off.length + " 个），请到账号管理重新登录", type: "warning", duration: 6000 });
+      }
+      /* 周期健康检查：服务中途重启后，RPA 与 AI 两个状态灯要能自己恢复，
+         不能停留在启动时的一次性结果上。失败静默，不弹窗打扰。 */
+      setInterval(async () => {
+        await checkEngine(false);
+        try {
+          const r = await api("/ai/config");
+          if (r && r.ok) {
+            state.aiReady = !!r.connected;
+            state.aiCfg.connected = !!r.connected;
+          }
+        } catch { state.aiReady = false; }
+      }, 15000);
+
+      /* 界面里的 JS 异常也要能查：把未捕获错误与 Promise 拒绝上报到服务端日志。
+         用 sendBeacon 而不是 fetch —— 页面正在卸载时它更可靠，且不阻塞。 */
+      if (typeof window !== "undefined") {
+        const reportClientError = (level, message, extra) => {
+          try {
+            const payload = JSON.stringify(Object.assign({
+              level, scope: "界面", message: String(message || "未知错误"),
+              url: location.href,
+            }, extra || {}));
+            if (navigator.sendBeacon) {
+              navigator.sendBeacon("/api/logs/client", new Blob([payload], { type: "application/json" }));
+            } else {
+              fetch("/api/logs/client", { method: "POST", headers: { "Content-Type": "application/json" }, body: payload, keepalive: true }).catch(() => {});
+            }
+          } catch { /* 上报失败不能影响界面 */ }
+        };
+        window.addEventListener("error", (e) => {
+          reportClientError("error", e.message || "脚本错误", {
+            line: e.lineno, column: e.colno,
+            stack: e.error && e.error.stack ? String(e.error.stack).slice(0, 1000) : "",
+          });
+        });
+        window.addEventListener("unhandledrejection", (e) => {
+          const r = e.reason;
+          reportClientError("error", (r && r.message) || "未处理的 Promise 拒绝", {
+            stack: r && r.stack ? String(r.stack).slice(0, 1000) : "",
+          });
+        });
+      }
+    });
+
+    /* 只读调试钩子：供自动化回归观察前端轮询/唤醒状态（不含业务写操作） */
+    window.__nfDebug = {
+      get tasks() { return state.tasks; },
+      get platforms() { return state.rpaPlatforms; },
+      hasActiveTask,
+      nextScheduledAt,
+      pollCount: 0,
+      wakeScheduled: 0,
+      wakeFired: 0,
+      /* 测试用：停止轮询与到点唤醒，避免干扰后续断言 */
+      stopPoll() {
+        if (taskPollTimer) { clearTimeout(taskPollTimer); taskPollTimer = null; }
+        if (wakeTimer) { clearTimeout(wakeTimer); wakeTimer = null; }
+        return true;
+      },
+      /* 测试用：把最近的定时任务改到 N 毫秒后到点，并重排唤醒定时器 */
+      setScheduledSoon(ms) {
+        const t = state.tasks.find((x) => x.status === "scheduled");
+        if (!t) return null;
+        t.scheduledAt = new Date(Date.now() + (ms || 1000)).toISOString();
+        scheduleWake();
+        return t.scheduledAt;
+      },
+    };
+
+    /* ---------- 内置浏览器（Electron 桌面版） ---------- */
+    function bWebEl() { return document.getElementById("bWeb"); }
+    function bNormalize(u) {
+      u = (u || "").trim();
+      if (!u) return "";
+      return /^https?:\/\//i.test(u) ? u : "https://" + u;
+    }
+    function bGo() {
+      const w = bWebEl(); const u = bNormalize(state.bUrl);
+      if (w && u) { state.bUrl = u; try { w.loadURL(u); } catch {} }
+    }
+    function bOpen(u) { state.bUrl = u; bGo(); }
+    /* 新建页面：开空白页，聚焦地址栏等用户输入 */
+    function bNewPage() {
+      state.bUrl = "about:blank";
+      const w = bWebEl();
+      if (w) { try { w.loadURL("about:blank"); } catch {} }
+      setTimeout(() => { const inp = document.querySelector(".b-bar input"); if (inp) inp.focus(); }, 60);
+    }
+    function bBack() { const w = bWebEl(); if (w) { try { w.goBack(); } catch {} } }
+    function bHome() { bOpen((bShortcuts.value[0] && bShortcuts.value[0].url) || "https://juejin.cn/"); }
+
+    onBeforeUnmount(() => {
+      if (typeof window !== "undefined") window.removeEventListener("resize", onWinResize);
+      /* 自动刷新定时器不能留在后台空转 */
+      stopLogAuto();
+    });
+
+    return { ...toRefs(state), typeLabels, typeLabel, statusName, tName, statusTagType, targetTagType, taskStatus, fmt, pageTitle, pageDesc, pageSection, engineText, statCards, statusDist, platformRank, pubStep, pubContent, readyTargets,
+      sideW, isRail,
+      aiModels, aiPreset, loadAiConfig, applyAiPreset, saveAiConfig, testAi, goAiSettings,
+      applyKeySite, disconnectAi, backToAiSettings, closeKeyTip,
+      aiLockedTip, onAiModeGate, onAiChip,
+      tapVersion, openLogPanel, loadLogs, toggleLogAuto, stopLogAuto, clearLogs, copyLogText, exportLogFile, copyLogDir, openLogDir, logTime, logLevelText, logExtraText,
+      openAiPanel, runAi, applyAiResult, fillToContent, copyAiResult, currentSelection,
+      openTextTool, runTextTool, applyTextTool,
+      bodyPreview, coverPreviewSrc, uploadCover, openCoverPicker, pickCover, coverImageOptions, uploadBodyImage, insertImageToBody, importMd, checkForbidden, mdAction, bodyChars,
+      metricCards, calDays, calShift, calToday, loadMedia, uploadMedia, delMedia, copyMediaPath, loadMetrics, saveMetrics, successTargets,
+      toggleTheme, closeAllWindows, clearProfile, saveInterval, copyApiAddr, loadKeepalive, saveKeepalive, runKeepaliveNow,
+      filteredAccounts, groupOptions, acctTotal, acctOnline, acctStale, saveGroup, checkAllLogins, checkHint, pickLoginPlatform,
+      loginState, loginText, loginDot, loginTag, isLoggedAny,
+      bGo, bOpen, bBack, bHome, bNewPage, bShortcuts, startLogin, finishLogin, cancelLogin, pubAccountOptions,
+      doPublish, openContentEditor, saveContent, saveDraft, delContent, closeEditor, onMenuSelect, rpaLogin, rpaCheck, refreshAccount, openAccountMeta, saveAccountMeta,
+      onNewContentMode, confirmGzhTemplate, gzhThemeName, gzhThemeScene, refreshGzhPreview, onGzhThemeChange, copyGzhHtml, exportGzhHtml, loadGzhTemplates, saveAuthor, gzhAuthor,
+      openTargetPlatform, verifyTarget, confirmTarget,
+      viewTask, submitTarget, retryTarget, submitAll, switchDataDir, resetDataDir };
+  },
+});
+app.component("task-table", TaskTable);
+for (const [name, comp] of Object.entries(ElementPlusIconsVue)) app.component(name, comp);
+app.use(ElementPlus, { locale: window.ElementPlusLocaleZhCn });
+app.mount("#app");
+</script>
+</body>
+</html>

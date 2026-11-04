@@ -1,0 +1,29 @@
+{
+  "name": "notefly",
+  "version": "1.1.0",
+  "private": true,
+  "description": "NoteFly · 本地多平台内容分发工作台，单引擎：NoteFly RPA",
+  "license": "MIT",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "node server.js",
+    "desktop": "electron .",
+    "test": "node --test tests/task-status.test.js tests/api-client.test.js tests/content-save.test.js tests/text-tools.test.js tests/text-diff.test.js tests/ai.test.js tests/gzh-render.test.js tests/data-dir.test.js tests/logger.test.js tests/server.test.js tests/batch3.test.js tests/server-recovery.test.js",
+    "test:ui": "node scripts/ui-smoke.js",
+    "test:ai": "node scripts/ai-e2e.js",
+    "test:gzh": "node scripts/gzh-e2e.js",
+    "test:shots": "node scripts/ui-shots.js",
+    "test:aikey": "node scripts/ai-key-check.js && node scripts/ai-key-browser-check.js",
+    "test:aikey:electron": "node scripts/ai-key-electron-check.js",
+    "test:accounts": "node scripts/account-state-check.js && node scripts/login-judge-check.js",
+    "test:log": "node scripts/log-check.js",
+    "test:log:electron": "node scripts/log-electron-check.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "playwright": "^1.64.1"
+  },
+  "devDependencies": {
+    "electron": "^45.1.0"
+  }
+}

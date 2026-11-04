@@ -1,0 +1,27 @@
+/* 用户数据与敏感信息（含登录态 cookie、AI Key）——绝不入库 */
+data/
+data.bak*
+*.zip
+
+/* 依赖 */
+node_modules/
+
+/* 测试与截图产物 */
+_shots/
+_shots-tmp-gzh/
+
+/* 导出工具与产物（GitHub 上直接看仓库，无需离线导出包） */
+_export/
+
+/* 临时文件 */
+settings-full.png
+*.log
+.DS_Store
+Thumbs.db
+
+/* 编辑器 */
+.vscode/
+.idea/
+
+/* 工作区内部笔记 */
+.workbuddy/
