@@ -2967,7 +2967,33 @@ const app = createApp({
       };
       reader.readAsDataURL(file);
     };
-    const uploadCover = (e) => uploadFile(e.target.files[0], (p) => (state.ceForm.cover = p));
+    /* 封面上传统一转成 JPEG：webp 等新格式部分平台拒收（2026-11-05 实机：封面注入后无预览）。
+       canvas 白底重绘规避透明通道，输出质量 0.92。转换失败则按原文件上传。 */
+    const coverToJpeg = (file) => new Promise((resolve) => {
+      try {
+        const img = new Image();
+        const url = URL.createObjectURL(file);
+        img.onload = () => {
+          try {
+            const c = document.createElement("canvas");
+            c.width = img.naturalWidth; c.height = img.naturalHeight;
+            const g = c.getContext("2d");
+            g.fillStyle = "#ffffff"; g.fillRect(0, 0, c.width, c.height);
+            g.drawImage(img, 0, 0);
+            c.toBlob((blob) => {
+              URL.revokeObjectURL(url);
+              if (blob && /jpe?g/.test(blob.type)) {
+                const name = (file.name || "cover").replace(/\.[^.]+$/, "") + ".jpg";
+                resolve(new File([blob], name, { type: "image/jpeg" }));
+              } else resolve(file);
+            }, "image/jpeg", 0.92);
+          } catch { URL.revokeObjectURL(url); resolve(file); }
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+        img.src = url;
+      } catch { resolve(file); }
+    });
+    const uploadCover = async (e) => { const f = await coverToJpeg(e.target.files[0]); uploadFile(f, (p) => (state.ceForm.cover = p)); };
     /* 光标处插入文本：全屏编辑器里插图/工具栏都按光标位置落，不再无脑追加到末尾 */
     function caretApply(fn) {
       const ta = document.querySelector(".ce-textarea");

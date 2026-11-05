@@ -500,6 +500,12 @@ const ADAPTERS = {
       await page.keyboard.insertText(snap.body || "");
       await sleep(2500); // 等自动保存草稿
     },
+    /* 2026-11-05 实机探针：掘金编辑器页面无封面入口（封面在发布确认面板里选择），
+       草稿模式拿不到 —— 如实说明 */
+    async uploadCover(page, snap) {
+      if (!snap || !snap.cover) return { ok: false, detail: "未设置封面" };
+      return { ok: false, detail: "掘金的封面在发布确认面板中从正文图片选择，草稿模式暂不支持，发布时请人工设置" };
+    },
     async submit(page) {
       /* 2026-11 实测掘金新编辑器发布确认面板：类名 .panel（含「确定并发布」），
          分类是面板里的 div.item 且必选。页面上另有隐藏的 .byte-modal（上传视频
@@ -743,6 +749,15 @@ function genericArticleAdapter(cfg) {
       if (/404|页面不存在|页面找不到/.test(pageTitle)) {
         throw new Error(`[${cfg.label}] 后台入口页面已失效（${pageTitle.slice(0, 30)}），平台可能已改版或下线该路径，请在账号页人工检查`);
       }
+      /* 平台「恢复上次草稿」弹窗（搜狐「继续编辑」等）会挡住编辑器初始化，
+         不处理会让 fill 轮询超时 —— 2026-11-05 实机复发。点击进入后清残留。 */
+      if (cfg.resumeDraftSel) {
+        /* 平台「恢复上次草稿」弹窗（搜狐「继续编辑」等）：精确文本定位点击 */
+        try {
+          const loc = page.getByText(cfg.resumeDraftSel, { exact: true }).first();
+          if (await loc.isVisible()) { await loc.click(); await sleep(3000); }
+        } catch { /* 无弹窗，正常继续 */ }
+      }
       // 中转入口：composeUrl 落在列表/首页路由时（编辑器元素不存在），先点一步进去
       if (cfg.entrySel) {
         const bodySels0 = cfg.bodySel || ["div[contenteditable='true']"];
@@ -776,15 +791,51 @@ function genericArticleAdapter(cfg) {
       // 标题
       const titleSel = cfg.titleSel || 'input[placeholder*="标题"], textarea[placeholder*="标题"]';
       const title = await waitSel(page, titleSel, 20000).catch(() => null);
-      if (title) {
-        if (await title.isVisible().catch(() => false)) {
-          await title.fill((snap.title || "").slice(0, cfg.titleMax || 100))
-            .catch((e) => console.warn(`[${cfg.label}] 标题填充失败，继续填正文：${String(e.message || e).slice(0, 120)}`));
-        } else {
-          console.warn(`[${cfg.label}] 标题输入框不可见，跳过标题填充`);
+      const titleText = (snap.title || "").slice(0, cfg.titleMax || 100);
+      let titleDone = false;
+      if (title && (await title.isVisible().catch(() => false))) {
+        titleDone = await title.fill(titleText).then(() => true)
+          .catch(() => false);
+      }
+      if (!titleDone) {
+        /* CSDN 等「展示态」标题：无内容时显示 DIV（article-bar__title-display），
+           真正的 input display:none —— 点击展示态切换出输入框（焦点自动落 input），
+           2026-11-05 真机验证：点击后 insertText 直写成功 */
+        const displayEl = await page.$('[class*="title-display"]').catch(() => null);
+        if (displayEl && (await displayEl.isVisible().catch(() => false))) {
+          await displayEl.click({ force: true }).catch(() => {});
+          await sleep(800);
         }
-      } else {
-        console.warn(`[${cfg.label}] 未找到标题输入框，尝试直接填正文`);
+        if (title) {
+          titleDone = await title.fill(titleText).then(() => true).catch(() => false);
+        }
+        if (!titleDone && titleText) {
+          /* 兜底 A：焦点已在输入框（点击展示态后），直接打字 */
+          const activeOk = await page.evaluate(() => {
+            const el = document.activeElement;
+            return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA") && /title|标题/i.test(String(el.className) + (el.placeholder || ""));
+          }).catch(() => false);
+          if (activeOk) {
+            await page.keyboard.insertText(titleText);
+            titleDone = await page.evaluate((t) => {
+              const el = document.activeElement;
+              return el && (el.value === t || el.innerText === t);
+            }, titleText).catch(() => false);
+          }
+        }
+        if (!titleDone && titleText) {
+          /* 兜底 B：React 受控组件用原生 setter 强制赋值并派发 input 事件 */
+          titleDone = await page.evaluate(({ sel, text }) => {
+            const el = document.querySelector(sel);
+            if (!el) return false;
+            const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+            setter.call(el, text);
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            return el.value === text;
+          }, { sel: titleSel.split(",")[0].trim(), text: titleText }).catch(() => false);
+        }
+        if (!titleDone) console.warn(`[${cfg.label}] 标题填充失败，继续填正文`);
       }
 
       // 正文：按模式写入
@@ -807,6 +858,14 @@ function genericArticleAdapter(cfg) {
         if (!el) continue;
         // 不可见的编辑器元素（如 CSDN 页面上隐藏的反馈 textarea）绝不能拿来填正文
         if (!(await el.isVisible().catch(() => false))) continue;
+        // 残留清空：搜狐「继续编辑」/ 大鱼「已载入上次的草稿」会把旧内容留在编辑器，
+        // 不清会导致新旧正文混排（2026-11-05 实机）—— 只在第一次命中时清一次
+        if (cfg.clearBeforeFill && !done) {
+          await el.evaluate((n) => n.focus()).catch(() => {});
+          await page.keyboard.press("Control+a").catch(() => {});
+          await page.keyboard.press("Delete").catch(() => {});
+          await sleep(600);
+        }
         try {
           if (sel.includes("CodeMirror")) {
             const ok = await page.evaluate((md) => {
@@ -872,6 +931,17 @@ function genericArticleAdapter(cfg) {
         if (!/草稿|保存/.test(txt)) continue;
         await btn.click().catch(() => {});
         await sleep(2500);
+        /* 平台弹确认对话框（一点号「确认保存？」等）：点一次 确定/确认/保存 */
+        const confirmSel = 'button:has-text("确定"), button:has-text("确认"), button:has-text("保存"), .el-button--primary, [class*="confirm"] button';
+        for (const csel of confirmSel.split(", ")) {
+          const c = await page.$(csel).catch(() => null);
+          if (!c || !(await c.isVisible().catch(() => false))) continue;
+          const ctxt = ((await c.innerText().catch(() => "")) || "").trim();
+          if (!/确定|确认|保存|是/.test(ctxt)) continue;
+          await c.click().catch(() => {});
+          await sleep(2000);
+          return { ok: true, detail: `已点击「${txt.trim().slice(0, 8)}」并确认弹窗「${ctxt.slice(0, 6)}」` };
+        }
         return { ok: true, detail: `已点击「${txt.trim().slice(0, 8)}」，草稿已请求保存` };
       }
       return { ok: false, detail: "未找到存草稿按钮，内容停留在编辑器页，请人工保存或发布" };
@@ -891,12 +961,25 @@ function genericArticleAdapter(cfg) {
           const el = els.nth(i);
           const accept = (await el.getAttribute("accept").catch(() => "")) || "";
           if (!/image/i.test(accept)) continue;
+          const cls = (await el.getAttribute("class").catch(() => "")) || "";
+          /* 反馈表单/非封面上传控件（CSDN cfw 反馈框等）—— 封面注进去等于
+             把图发给平台客服，2026-11-05 实机事故 */
+          if (/cfw|feedback|report/i.test(cls)) continue;
+          if (/\.md/i.test(accept)) continue;
           await el.setInputFiles(local).catch(() => {});
           await sleep(4000);
           return true;
         }
         return false;
       };
+      /* 注入后验证：封面缩略图应出现在页面里（注入前后大图对比）。
+         没有 → 平台拒收（如 webp）或注入了错误控件，如实回报 */
+      const countBigImgs = () => page.evaluate(() =>
+        [...document.querySelectorAll("img")].filter((im) => im.getBoundingClientRect().width > 40 && im.getBoundingClientRect().height > 30).length
+      ).catch(() => 0);
+      /* 平台封面在发布弹窗（CSDN/掘金）等草稿模式拿不到的场景：如实说明，不瞎扫控件 */
+      if (cfg.coverNote) return { ok: false, detail: cfg.coverNote };
+      const before = await countBigImgs();
       for (const sel of cfg.coverBtnSel || []) {
         const btn = await page.$(sel).catch(() => null);
         if (!btn || !(await btn.isVisible().catch(() => false))) continue;
@@ -905,16 +988,24 @@ function genericArticleAdapter(cfg) {
         /* 搜狐等平台点击后才挂载 image file input，轮询等待 */
         for (let i = 0; i < 10; i++) {
           await sleep(500);
-          if (await injectIntoImageInputs()) return { ok: true, detail: "封面已上传" };
+          if (await injectIntoImageInputs()) {
+            await sleep(6000);
+            if ((await countBigImgs()) > before) return { ok: true, detail: "封面已上传" };
+            /* 注入后没有新图 —— 平台可能拒收了文件（如 webp），如实回报 */
+          }
         }
         const fc = await fcPromise;
         if (fc) {
           await fc.setFiles(local).catch(() => {});
-          await sleep(4000);
-          return { ok: true, detail: "封面已通过文件对话框上传" };
+          await sleep(6000);
+          if ((await countBigImgs()) > before) return { ok: true, detail: "封面已通过文件对话框上传" };
         }
       }
-      if (await injectIntoImageInputs()) return { ok: true, detail: "封面已注入页面上传控件" };
+      if (await injectIntoImageInputs()) {
+        await sleep(6000);
+        if ((await countBigImgs()) > before) return { ok: true, detail: "封面已上传（通用控件注入）" };
+        return { ok: false, detail: "封面已注入控件但未出现预览 —— 平台可能拒收该格式，请改用 jpg/png 后重试" };
+      }
       return { ok: false, detail: "未找到封面上传入口，请人工补传" };
     },
     async submit(page) {
@@ -1064,18 +1155,65 @@ const ADAPTERS_EXTRA = {
     bodySel: ["pre.editor__inner", ".CodeMirror", "div[contenteditable='true']", "textarea"],
     /* 2026-11-05 实机探针：工具栏「保存草稿」button.btn-save（el-popover__reference） */
     draftSaveSel: ["button.btn-save"],
+    /* 2026-11-05 实机探针：CSDN 编辑器页面无封面入口（封面在「发布文章」弹窗里），
+       草稿模式拿不到 —— 如实说明，不再乱扫控件（此前封面被注进反馈表单） */
+    coverNote: "CSDN 的封面在「发布文章」弹窗中设置，草稿模式暂不支持，发布时请人工上传封面",
   }),
-  toutiao: genericArticleAdapter({
-    label: "头条号",
-    composeUrl: "https://mp.toutiao.com/profile_v4/graphic/publish",
-    homeUrl: "https://mp.toutiao.com/",
-    titleSel: 'input[placeholder*="标题"], .publish-title input',
-    bodySel: [".ProseMirror", "div[contenteditable='true']"],
-    titleMax: 30,
-    submitSel: 'button:has-text("发布"), button:has-text("发表")',
-    /* 2026-11-05 实机探针：头条号编辑页左下角「草稿将自动保存」，无需点按钮 */
-    draftAutoSave: true,
-  }),
+  toutiao: (() => {
+    const ad = genericArticleAdapter({
+      label: "头条号",
+      composeUrl: "https://mp.toutiao.com/profile_v4/graphic/publish",
+      homeUrl: "https://mp.toutiao.com/",
+      /* 2026-11-05 实机探针：头条标题是 textarea（无 class，placeholder 动态） */
+      titleSel: 'textarea[placeholder*="标题"], input[placeholder*="标题"], .publish-title textarea, .publish-title input',
+      bodySel: [".ProseMirror", "div[contenteditable='true']"],
+      titleMax: 30,
+      submitSel: 'button:has-text("发布"), button:has-text("发表")',
+      /* 2026-11-05 实机探针：头条号编辑页左下角「草稿将自动保存」，无需点按钮 */
+      draftAutoSave: true,
+    });
+    /* 头条封面专属流程（通用入口拿不到）：封面设置是 radio 组「单图/三图/无封面」
+       → 点「单图」→ 出现上传图片框 → 点击后 filechooser/动态 input 注入 */
+    ad.uploadCover = async function (page, snap) {
+      const local = resolveLocalMedia(snap && snap.cover);
+      if (!local) return { ok: false, detail: snap && snap.cover ? "封面不是本地文件，跳过上传" : "未设置封面" };
+      const radio = await page.$('label:has-text("单图"), .byte-radio:has-text("单图")').catch(() => null);
+      if (radio) {
+        const checked = await radio.evaluate((n) => /checked|active/.test(String(n.className)) || /checked|active/.test(String(n.parentElement.className))).catch(() => false);
+        if (!checked) { await radio.click().catch(() => {}); await sleep(2000); }
+      }
+      /* 上传框：2026-11-05 真机实测 .article-cover-add（154x120 图片框），
+         点击后挂载 file input，注入后封面缩略图出现在页面 */
+      const zoneSels = [".article-cover-add", '[class*="cover"] [class*="add"]', '[class*="upload-cover"]'];
+      const before = await page.evaluate(() => [...document.querySelectorAll("img")].filter((im) => im.getBoundingClientRect().width > 40).length).catch(() => 0);
+      for (const sel of zoneSels) {
+        const zone = await page.$(sel).catch(() => null);
+        if (!zone || !(await zone.isVisible().catch(() => false))) continue;
+        const fcPromise = page.waitForEvent("filechooser", { timeout: 6000 }).catch(() => null);
+        await zone.click({ force: true }).catch(() => {});
+        await sleep(1500);
+        const els = page.locator('input[type=file]');
+        const n = await els.count();
+        for (let k = 0; k < n; k++) {
+          const accept = (await els.nth(k).getAttribute("accept").catch(() => "")) || "";
+          if (!/image/i.test(accept)) continue;
+          await els.nth(k).setInputFiles(local).catch(() => {});
+          await sleep(6000);
+          const after = await page.evaluate(() => [...document.querySelectorAll("img")].filter((im) => im.getBoundingClientRect().width > 40).length).catch(() => 0);
+          if (after > before) return { ok: true, detail: "封面已上传" };
+        }
+        const fc = await fcPromise;
+        if (fc) {
+          await fc.setFiles(local).catch(() => {});
+          await sleep(6000);
+          const after = await page.evaluate(() => [...document.querySelectorAll("img")].filter((im) => im.getBoundingClientRect().width > 40).length).catch(() => 0);
+          if (after > before) return { ok: true, detail: "封面已通过文件对话框上传" };
+        }
+      }
+      return { ok: false, detail: "未找到头条封面上传区（单图模式已尝试），请人工补传" };
+    };
+    return ad;
+  })(),
   baijiahao: (() => {
     const base = genericArticleAdapter({
       label: "百家号",
@@ -1132,6 +1270,10 @@ const ADAPTERS_EXTRA = {
     draftSaveSel: ['li.publish-report-btn:has-text("存草稿")'],
     /* 封面：点「上传图片」div.upload-file.mp-upload 后才挂载 image file input */
     coverBtnSel: ["div.upload-file.mp-upload"],
+    /* 2026-11-05 实机：编辑器打开时若有历史草稿会弹「继续编辑」面板挡住初始化，
+       导致 fill 轮询 15s 超时（16:49 任务复发）。点进去并清残留 */
+    resumeDraftSel: "继续编辑",
+    clearBeforeFill: true,
   }),
   oschina: genericArticleAdapter({
     label: "开源中国",
@@ -1147,10 +1289,13 @@ const ADAPTERS_EXTRA = {
     /* 2026-11 实测：composeUrl 打开后落在 #/Home 文章列表（无任何编辑器元素），
        必须再点侧栏「发文章」（a[href="#/Writing/articleEditor"]）才进编辑器 */
     entrySel: 'a[href="#/Writing/articleEditor"]',
-    titleSel: 'input[placeholder*="标题"]',
+    /* 2026-11-05 实机探针：标题 input.post-title（通用 placeholder 选择器也命中） */
+    titleSel: 'input.post-title, input[placeholder*="标题"]',
     bodySel: [".ProseMirror", "div[contenteditable='true']"],
     /* 一点号编辑器存草稿按钮未实测，给通用候选；找不到时回退停在编辑器 */
     draftSaveSel: ['button:has-text("存草稿")', 'button:has-text("保存")'],
+    /* 2026-11-05 实机探针：编辑器右上「添加封面」→ upload-input 常驻 */
+    coverBtnSel: ['div:has-text("添加封面")', 'input[type=file][accept*=image]'],
   }),
   dayu: genericArticleAdapter({
     label: "大鱼号",
@@ -1158,8 +1303,12 @@ const ADAPTERS_EXTRA = {
     homeUrl: "https://mp.dayu.com/",
     titleSel: 'input[placeholder*="标题"]',
     bodySel: [".ProseMirror", ".w-e-text[contenteditable]", "div[contenteditable='true']"],
-    /* 2026-11-05 实机探针：编辑区下方「保存」button.w-btn */
+    /* 2026-11-05 实机探针：编辑区下方「保存」button.w-btn；
+       且页面会「自动载入上次的草稿」→ 填前清残留 */
     draftSaveSel: ['button.w-btn:has-text("保存")'],
+    clearBeforeFill: true,
+    /* 封面按钮为两层结构（点封面入口 → 面板里上传），交给通用兜底注入 */
+    coverBtnSel: ['[class*="cover_normal-item"]', 'div:has-text("添加封面")'],
   }),
   /* ---------- 第二批平台（参照同类分发产品扩充，均为纯文字创作后台） ---------- */
   weixin: genericArticleAdapter({
