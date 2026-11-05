@@ -891,13 +891,15 @@ const ADAPTERS_EXTRA = {
   }),
   sohu: genericArticleAdapter({
     label: "搜狐号",
-    /* 2026-11-05 实机探针：旧入口 /mpbp/bp/base-info 已 404 下线，
-       搜狐号登录页整体改版（登录后从首页「创作中心」进后台）。
-       新发布路径待登录确认后更新；fill 的 404 检测会给出明确报错 */
-    composeUrl: "https://mp.sohu.com/mpbp/bp/base-info",
+    /* 2026-11-05 实机探针（用户提供新创作中心地址后确认）：
+       旧入口 /mpbp/bp/base-info 已 404 下线；新后台 mpfe/v4，
+       文章编辑器 /news/addarticle?contentStatus=1，正文是 Quill（.ql-editor）。
+       发布时可能触发腾讯滑块验证码（turing.captcha.gtimg.com）→ 停在草稿人工处理 */
+    composeUrl: "https://mp.sohu.com/mpfe/v4/contentManagement/news/addarticle?contentStatus=1",
     homeUrl: "https://mp.sohu.com/",
     titleSel: 'input[placeholder*="标题"]',
-    bodySel: [".w-e-text[contenteditable]", ".ProseMirror", "div[contenteditable='true']"],
+    bodySel: [".ql-editor", ".w-e-text[contenteditable]", ".ProseMirror", "div[contenteditable='true']"],
+    plainText: true,
   }),
   oschina: genericArticleAdapter({
     label: "开源中国",
