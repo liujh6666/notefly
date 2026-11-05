@@ -1559,6 +1559,45 @@ app.post("/api/checkwords", (req, res) => {
   res.json({ status: "checked", words: w.words.length, hits });
 });
 
+/* 违禁词库管理：列出 / 全量保存 / 恢复默认。
+ * 存储就是 data/forbidden-words.txt（一行一词），发布检测与数据目录迁移都认它 */
+function sanitizeWords(list) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  const seen = new Set();
+  for (const raw of list) {
+    const w = String(raw == null ? "" : raw).trim();
+    if (!w || w.length > 60 || seen.has(w)) continue;
+    seen.add(w);
+    out.push(w);
+    if (out.length >= 2000) break;
+  }
+  return out;
+}
+app.get("/api/forbidden-words", (req, res) => {
+  const w = loadWords();
+  if (w.status === "unavailable") return res.status(500).json({ error: "words_file_unavailable", message: w.error });
+  res.json({ status: "checked", words: w.words });
+});
+app.put("/api/forbidden-words", (req, res) => {
+  const words = sanitizeWords((req.body || {}).words);
+  if (!words) return res.status(400).json({ error: "bad_request", message: "words 必须是字符串数组" });
+  try {
+    fs.writeFileSync(dataDir.wordsFile(), words.join("\n") + (words.length ? "\n" : ""), "utf8");
+  } catch (e) {
+    return res.status(500).json({ error: "write_failed", message: e.message });
+  }
+  res.json({ ok: true, count: words.length });
+});
+app.post("/api/forbidden-words/reset", (req, res) => {
+  try {
+    fs.writeFileSync(dataDir.wordsFile(), DEFAULT_WORDS.join("\n") + "\n", "utf8");
+  } catch (e) {
+    return res.status(500).json({ error: "write_failed", message: e.message });
+  }
+  res.json({ ok: true, count: DEFAULT_WORDS.length, words: DEFAULT_WORDS.slice() });
+});
+
 /* 数据看板：按任务手动登记各平台数据 + 聚合 */
 app.post("/api/tasks/:id/metrics/:accountId", (req, res) => {
   const task = store.tasks.find((t) => t.id === req.params.id);

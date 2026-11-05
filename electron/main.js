@@ -70,8 +70,10 @@ process.env.NOTEFLY_CDP_PORT = CDP_PORT;
 app.commandLine.appendSwitch("remote-debugging-port", CDP_PORT);
 app.commandLine.appendSwitch("remote-allow-origins", "*");
 
-/* 单实例：二次启动时聚焦已有窗口 */
-const gotLock = app.requestSingleInstanceLock();
+/* 单实例：二次启动时聚焦已有窗口
+ * （NOTEFLY_TEST_MULTI=1 豁免：真机检查脚本用独立 NOTEFLY_DATA_DIR 起第二个实例，
+ *   数据完全隔离，不会互相干扰；正常运行不受影响） */
+const gotLock = process.env.NOTEFLY_TEST_MULTI === "1" || app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {

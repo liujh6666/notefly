@@ -16,7 +16,7 @@
     "desktop": "electron .",
     "make:lnk": "node scripts/make-lnk.js",
     "postinstall": "node scripts/make-lnk.js",
-    "test": "node --test tests/task-status.test.js tests/api-client.test.js tests/content-save.test.js tests/text-tools.test.js tests/text-tools-p0.test.js tests/text-diff.test.js tests/ai.test.js tests/ai-endpoint.test.js tests/gzh-render.test.js tests/data-dir.test.js tests/data-dir-p0.test.js tests/logger.test.js tests/server.test.js tests/server-p0.test.js tests/batch3.test.js tests/server-recovery.test.js tests/task-progress.test.js tests/messages.test.js tests/safe-fetch.test.js tests/article-extract.test.js tests/content-library.test.js tests/writing-context.test.js tests/updater.test.js tests/accounts.test.js",
+    "test": "node --test tests/task-status.test.js tests/api-client.test.js tests/content-save.test.js tests/text-tools.test.js tests/text-tools-p0.test.js tests/text-diff.test.js tests/ai.test.js tests/ai-endpoint.test.js tests/gzh-render.test.js tests/data-dir.test.js tests/data-dir-p0.test.js tests/logger.test.js tests/server.test.js tests/server-p0.test.js tests/batch3.test.js tests/server-recovery.test.js tests/task-progress.test.js tests/messages.test.js tests/safe-fetch.test.js tests/article-extract.test.js tests/content-library.test.js tests/writing-context.test.js tests/updater.test.js tests/accounts.test.js tests/forbidden-words-api.test.js",
     "test:ui": "node scripts/ui-smoke.js",
     "test:ai": "node scripts/ai-e2e.js",
     "test:gzh": "node scripts/gzh-e2e.js",
@@ -36,7 +36,9 @@
     "build": "electron-builder --win --x64",
     "build:mac": "electron-builder --mac",
     "build:dir": "electron-builder --dir",
-    "publish": "electron-builder --win --x64 --publish always"
+    "publish": "electron-builder --win --x64 --publish always",
+    "test:forbidden": "node scripts/forbidden-words-e2e.js",
+    "test:login:focus": "node scripts/login-focus-check.js"
   },
   "dependencies": {
     "electron-updater": "^6.8.11",

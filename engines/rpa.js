@@ -1300,7 +1300,14 @@ async function openAccountLoginWindow(accountId) {
   const win = workerWins.get(page);
   if (!win) throw new Error("登录窗口创建失败");
   loginWins.set(acct.id, { win, page, partition: acct.partition });
-  try { win.show(); win.focus(); } catch { /* 忽略 */ }
+  try {
+    win.show();
+    win.focus();
+    /* 键盘焦点必须显式落到 webContents：show:false 创建的窗口 win.focus() 只给
+       窗口焦点，页面没有自动 focus 输入框时物理键盘（含 IME）打不了字 */
+    win.webContents.focus();
+    win.on("focus", () => { try { if (!win.webContents.isFocused()) win.webContents.focus(); } catch { /* 忽略 */ } });
+  } catch { /* 忽略 */ }
   win.on("closed", () => loginWins.delete(acct.id));
   return { ok: true, mode: "window", accountId: acct.id, partition: acct.partition };
 }

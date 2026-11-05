@@ -1242,6 +1242,21 @@
                   <div class="grow"><div class="strong">发布前违禁词检测</div><div class="muted">命中广告法/平台风控词时弹窗提醒，可强制继续</div></div>
                   <el-switch v-model="checkWordsOnPublish"></el-switch>
                 </div>
+                <div class="set-row" style="align-items:flex-start">
+                  <el-icon class="set-ico"><collection /></el-icon>
+                  <div class="grow">
+                    <div class="strong">违禁词库</div>
+                    <div class="muted">发布前检测按这个词库逐词匹配，每行一个词，可自由增删改，保存后立即生效（当前 {{ fwCount }} 个词）</div>
+                    <el-input type="textarea" v-model="fwText" :rows="9"
+                      style="margin-top:8px" placeholder="每行一个违禁词，例如：&#10;最佳&#10;全网最低&#10;稳赚"
+                      @input="onFwInput"></el-input>
+                    <div class="data-dir-actions">
+                      <el-button size="small" type="primary" :loading="fwBusy" :disabled="!fwDirty" @click="saveForbiddenWords">保存词库</el-button>
+                      <el-button size="small" :loading="fwBusy" @click="resetForbiddenWords">恢复默认词库</el-button>
+                      <span v-if="fwDirty" class="muted" style="font-size:12px">有未保存的修改</span>
+                    </div>
+                  </div>
+                </div>
               </el-card>
             </div>
 
@@ -1907,6 +1922,8 @@ const app = createApp({
       dataWarnings: [],
       /* 数据存储位置 */
       dataDirInput: "", dataDirBusy: false,
+      /* 违禁词库管理（data/forbidden-words.txt，一行一词） */
+      fwText: "", fwBusy: false, fwCount: 0, fwDirty: false,
       mediaFiles: [],
       metricsSummary: [],
       calYear: new Date().getFullYear(), calMonth: new Date().getMonth() + 1,
@@ -4561,6 +4578,45 @@ const app = createApp({
       }
     }
 
+    /* ---------- 违禁词库管理 ----------
+       服务端存 data/forbidden-words.txt（一行一词），发布检测逐词匹配；
+       全量保存是唯一写路径，简单且和文件形态一致 */
+    function fwLoadText(words) {
+      state.fwText = (words || []).join("\n");
+      state.fwCount = (words || []).length;
+      state.fwDirty = false;
+    }
+    async function loadForbiddenWords() {
+      const r = await api("/forbidden-words").catch(() => null);
+      if (r && Array.isArray(r.words)) fwLoadText(r.words);
+    }
+    function onFwInput() { state.fwDirty = true; }
+    async function saveForbiddenWords() {
+      const words = state.fwText.split(/\r?\n/).map((w) => w.trim()).filter(Boolean);
+      const uniq = [...new Set(words)];
+      state.fwBusy = true;
+      try {
+        const r = await api("/forbidden-words", { method: "PUT", body: { words: uniq } });
+        if (!r || !r.ok) return apiError("保存违禁词库失败", r);
+        fwLoadText(uniq);
+        ElMessage.success("违禁词库已保存（" + uniq.length + " 个词），发布检测立即生效");
+      } finally {
+        state.fwBusy = false;
+      }
+    }
+    async function resetForbiddenWords() {
+      await ElMessageBox.confirm("将恢复内置默认词库（" + "广告法/平台风控常用词" + "），你现在的修改会被覆盖。确定继续？", "恢复默认词库", { type: "warning", confirmButtonText: "恢复默认", cancelButtonText: "取消" });
+      state.fwBusy = true;
+      try {
+        const r = await api("/forbidden-words/reset", { method: "POST" });
+        if (!r || !r.ok) return apiError("恢复默认词库失败", r);
+        fwLoadText(r.words);
+        ElMessage.success("已恢复默认词库（" + r.count + " 个词）");
+      } finally {
+        state.fwBusy = false;
+      }
+    }
+
     /* 窄屏适配：侧边栏宽度是 el-aside 的内联样式，CSS 覆盖不了，这里用绑定控制。
        桌面版窗口最小 1024px，这套规则主要照顾浏览器里窄窗口打开的情况。 */
     const winW = ref(typeof window !== "undefined" ? window.innerWidth : 1440);
@@ -4572,6 +4628,7 @@ const app = createApp({
     onMounted(async () => {
       toggleTheme(state.themeDark); // 应用持久化主题
       await checkEngine(true); await loadAll();
+      loadForbiddenWords();
       /* 消息中心 / 企业内容库 / 更新状态 */
       await loadCompanies();
       await loadMessages(); await loadTasks();
@@ -4772,6 +4829,7 @@ const app = createApp({
       onNewContentMode, confirmGzhTemplate, gzhThemeName, gzhThemeScene, refreshGzhPreview, onGzhThemeChange, copyGzhHtml, exportGzhHtml, loadGzhTemplates, saveAuthor, gzhAuthor,
       openTargetPlatform, verifyTarget, confirmTarget,
       viewTask, submitTarget, retryTarget, submitAll, switchDataDir, resetDataDir,
+      loadForbiddenWords, onFwInput, saveForbiddenWords, resetForbiddenWords,
       /* 消息中心 / 全局进度 */
       openMsgDrawer, closeMsgDrawer, loadMessages, loadTasks, activeTasks, finishedTasks,
       taskPercent, taskElapsed, taskKindLabel, taskStatusLabel, msgKindLabel,
