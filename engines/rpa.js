@@ -342,7 +342,10 @@ const ADAPTERS = {
     contentType: "ARTICLE",
     composeUrl: "https://juejin.cn/editor/drafts/new",
     status: "verified",
-    capabilities: { draft: "verified", autoSubmit: "unverified", verify: "unverified" },
+    /* 2026-11-05 真机干跑验证发布链：点「发布」→ 确认面板 .panel（分类 .item 必选）
+       →「确定并发布」三步元素全部在位（页面上另有隐藏的 .byte-modal 上传视频旧弹窗，
+       不能用它判断弹窗出现）。autoSubmit 据此放行。 */
+    capabilities: { draft: "verified", autoSubmit: "verified", verify: "unverified" },
     /* 实测：未登录返回 {"err_no":403,"err_msg":"must login"}，已登录返回 err_no 0 + 矿石数 */
     loginProbe: { api: "https://api.juejin.cn/growth_api/v1/get_cur_point", judge: { codeField: "err_no", okCode: 0 } },
     async isLoggedIn(page) {
@@ -376,15 +379,18 @@ const ADAPTERS = {
       await sleep(2500); // 等自动保存草稿
     },
     async submit(page) {
-      /* 点「发布」弹出确认面板：分类/标签/封面，分类必选，然后「确定并发布」 */
+      /* 2026-11 实测掘金新编辑器发布确认面板：类名 .panel（含「确定并发布」），
+         分类是面板里的 div.item 且必选。页面上另有隐藏的 .byte-modal（上传视频
+         旧弹窗）—— 绝不能用 .publish-dialog/.byte-modal 判断弹窗是否出现。 */
       await page.getByRole("button", { name: "发布", exact: true }).first().click();
-      await waitSel(page, ".publish-dialog, .byte-modal", 15000);
+      const panel = page.locator(".panel", { hasText: "确定并发布" }).first();
+      await panel.waitFor({ state: "visible", timeout: 15000 });
       await sleep(800);
       /* 分类必选：点第一项 */
-      const cat = page.locator(".publish-dialog li, .byte-modal li").first();
+      const cat = panel.locator("div.item").first();
       if (await cat.count()) await cat.click().catch(() => {});
       await sleep(500);
-      await page.getByRole("button", { name: "确定并发布" }).first().click();
+      await panel.getByRole("button", { name: "确定并发布" }).first().click();
       await sleep(3000);
     },
   },
@@ -533,6 +539,20 @@ function genericArticleAdapter(cfg) {
       });
     },
     async fill(page, snap) {
+      // 中转入口：composeUrl 落在列表/首页路由时（编辑器元素不存在），先点一步进去
+      if (cfg.entrySel) {
+        const bodySels0 = cfg.bodySel || ["div[contenteditable='true']"];
+        const titleSel0 = cfg.titleSel || 'input[placeholder*="标题"]';
+        const inEditor = (await page.$(titleSel0).catch(() => null)) ||
+          (await page.$(bodySels0[0]).catch(() => null));
+        if (!inEditor) {
+          const entry = await page.$(cfg.entrySel).catch(() => null);
+          if (entry) {
+            await entry.click().catch(() => {});
+            await sleep(3000);
+          }
+        }
+      }
       // 标题
       const titleSel = cfg.titleSel || 'input[placeholder*="标题"], textarea[placeholder*="标题"]';
       const title = await waitSel(page, titleSel, 20000).catch(() => null);
@@ -646,6 +666,9 @@ const ADAPTERS_EXTRA = {
     label: "一点号",
     composeUrl: "https://mp.yidianzixun.com/home/q/editor",
     homeUrl: "https://mp.yidianzixun.com/",
+    /* 2026-11 实测：composeUrl 打开后落在 #/Home 文章列表（无任何编辑器元素），
+       必须再点侧栏「发文章」（a[href="#/Writing/articleEditor"]）才进编辑器 */
+    entrySel: 'a[href="#/Writing/articleEditor"]',
     titleSel: 'input[placeholder*="标题"]',
     bodySel: [".ProseMirror", "div[contenteditable='true']"],
   }),

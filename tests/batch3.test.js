@@ -122,8 +122,11 @@ test("能力表按平台给出草稿/自动提交/核验三项能力", () => {
   assert.equal(typeof juejin.capabilities.draft, "string");
   assert.equal(typeof juejin.capabilities.autoSubmit, "string");
   assert.equal(typeof juejin.capabilities.verify, "string");
-  /* 草稿能力验证过 ≠ 自动提交能力验证过 */
-  assert.notEqual(juejin.capabilities.draft, juejin.capabilities.autoSubmit);
+  /* 草稿能力验证过 ≠ 自动提交能力验证过 —— 掘金 2026-11-05 真机验证发布链后
+     两项都是 verified；这条防线改用「从未真机验证过提交的平台」守护 */
+  const weibo = list.find((p) => p.id === "weibo");
+  assert.ok(weibo, "缺少微博平台");
+  assert.notEqual(weibo.capabilities.autoSubmit, "verified", "微博未真机验证过自动提交，不得放行");
 });
 
 test("unverified 微博走 publish 模式：不得调用 submit，必须停在草稿", async () => {
