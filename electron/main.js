@@ -405,6 +405,7 @@ if (!gotLock) {
     });
     if (!trayResult.ok) {
       console.error("[NoteFly] 托盘创建失败：", trayResult.error);
+      try { logger.error("托盘创建失败：" + trayResult.error); } catch { /* 忽略 */ }
       /* 主窗口保持可见；把原因告诉渲染进程，在界面上显示 */
       const w = lifecycle.state.mainWindow;
       if (w && !w.isDestroyed()) {

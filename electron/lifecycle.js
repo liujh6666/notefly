@@ -130,7 +130,7 @@ function notifyHiddenOnce() {
     if (Notification && Notification.isSupported()) {
       const n = new Notification({
         title: "NoteFly 已在后台运行",
-        body: "可从托盘图标打开或退出。采集、AI 与发布任务会继续运行。",
+        body: "点任务栏右下角的 ^ 展开隐藏图标即可找到 NoteFly（右键托盘图标可退出）。",
       });
       n.on("click", () => showMainWindow());
       n.show();
@@ -238,6 +238,8 @@ async function quit(opts) {
   const o = opts || {};
   if (state.phase === "quitting") return { ok: true, already: true };
   state.phase = o.phase || "quitting";
+  /* 退出原因落日志：进程消失时才能回溯是谁让它退的 */
+  try { require("../lib/logger").info("应用退出：" + (o.reason || "用户请求")); } catch { /* 日志不可用不影响退出 */ }
 
   const win = state.mainWindow;
 
