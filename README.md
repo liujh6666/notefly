@@ -50,6 +50,23 @@ npm start
 2. **设置 → AI 模型**（可选）→ 填 baseUrl + API Key + 模型名，Key 只存本地
 3. **内容库 → 新建内容** → 写作 → 勾选账号 → 发布到草稿箱
 
+## 启动方式：为什么用快捷方式而不是 .bat
+
+`npm install` 之后，仓库根目录会生成两个 **Windows 快捷方式**：
+
+| 入口 | 形态 | 控制台窗口 |
+|---|---|---|
+| `启动NoteFly桌面版.lnk` | 桌面版（应用窗口 + 托盘 + 内置浏览器） | **完全没有** |
+| `启动NoteFly.lnk` | 浏览器版（后台跑服务，自动打开系统浏览器） | **完全没有** |
+| `启动NoteFly桌面版.bat` / `启动NoteFly.bat` | 同上，兼容入口 | 会**闪一下**（见下） |
+| `停止NoteFly.bat` | 停掉 3210 端口的服务 | 一闪而过 |
+
+**直接双击 `.lnk` 是零窗口的。** 快捷方式指向 `electron.exe`——它是 GUI 子系统程序（PE Subsystem=2），不分配控制台，所以屏幕上不会出现任何黑框。
+
+`.bat` 做不到这一点：`.bat` 一定由 `cmd.exe` 执行，而 `cmd.exe` 是控制台子系统程序，Windows 11 上还会被「默认终端应用」（Windows Terminal）接管，**控制台窗口一定会出现**，脚本层只能让它尽快消失。所以 `.bat` 被改成了「转交同名 `.lnk` 后立即退出」的最短形态（移除了旧版里的 `pause` 和前台运行的 `node server.js` —— 这两样才是窗口赖着不走的真正原因）。
+
+> 换机器或换了安装目录后，快捷方式里的绝对路径会失效，执行 `npm run make:lnk` 重新生成即可（需要 Python；没有 Python 时会自动改用 Windows 自带的 PowerShell）。
+
 ## 数据与隐私
 
 - 所有数据存在 `data/` 目录（内容、配置、登录态、日志），**不经过任何第三方服务器**
@@ -72,13 +89,15 @@ npm run test:shots       # 90 张多主题多宽度截图 + 溢出检测
 
 ```
 ├─ server.js            Express 服务端：全部接口 + 定时调度 + 保活巡检
-├─ lib/                 状态归并 / 文本工具 / AI 客户端 / 公众号排版 / 日志 / 数据目录
+├─ lib/                 状态归并 / 文本工具 / AI 客户端 / 公众号排版 / 日志 / 数据目录 / 脱离控制台
 ├─ engines/rpa.js       Playwright 引擎：CDP 接管、登录判定、平台适配器、发布编排
 ├─ electron/            桌面外壳（主进程 + preload）
 ├─ public/              前端单页应用（Vue3 + Element Plus，无构建，改完刷新即生效）
 ├─ tests/               单元 + 集成测试
-├─ scripts/             端到端测试与工具脚本
-└─ docs/                修复报告
+├─ scripts/             端到端测试、快捷方式生成器与工具脚本
+├─ docs/                修复报告
+├─ 启动NoteFly桌面版.lnk / 启动NoteFly.lnk      零窗口启动入口（npm run make:lnk 生成）
+└─ 启动NoteFly桌面版.bat / 启动NoteFly.bat      兼容入口（会闪一下控制台）
 ```
 
 技术栈：Electron 45 · Express 4 · Playwright 1.64 · Vue 3 · Element Plus · 原生 CSS 令牌，无打包工具、无 TypeScript。

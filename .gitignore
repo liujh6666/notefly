@@ -19,6 +19,10 @@ settings-full.png
 .DS_Store
 Thumbs.db
 
+/* 快捷方式：里面写的是本机绝对路径（node_modules/electron/dist/electron.exe），
+   换机器就失效 —— 用 npm run make:lnk 现场生成，不入库 */
+*.lnk
+
 /* 编辑器 */
 .vscode/
 .idea/

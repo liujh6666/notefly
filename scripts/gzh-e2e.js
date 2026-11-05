@@ -112,7 +112,7 @@ const SAMPLE = `# 用 NoteFly 写公众号文章
   check("模板清单带名称与配色", !!(tpl.templates || []).every((t) => t.name && t.swatch && t.swatch.length === 3));
 
   /* ---------- 2. 普通文章路径：主按钮行为不变 ---------- */
-  await page.locator(".sidebar .el-menu-item", { hasText: "内容库" }).click();
+  await page.locator(".sidebar .el-menu-item").filter({ hasText: /^内容库$/ }).click();
   await sleep(400);
   await page.getByRole("button", { name: /新建内容/ }).click();
   await sleep(500);
@@ -129,7 +129,7 @@ const SAMPLE = `# 用 NoteFly 写公众号文章
   check("普通文章不带模板标识", normal ? !normal.gzhTheme : false, JSON.stringify(normal && normal.gzhTheme));
 
   /* ---------- 3. 公众号文章路径：下拉 → 模板选择 ---------- */
-  await page.locator(".sidebar .el-menu-item", { hasText: "内容库" }).click();
+  await page.locator(".sidebar .el-menu-item").filter({ hasText: /^内容库$/ }).click();
   await sleep(400);
   /* 点下拉箭头（不是主按钮） */
   await page.locator(".el-dropdown__caret-button").first().click();
@@ -190,7 +190,7 @@ const SAMPLE = `# 用 NoteFly 写公众号文章
   check("公众号文章仍是 ARTICLE 类型（不影响发布）", wechat ? wechat.type === "ARTICLE" : false, wechat && wechat.type);
 
   /* ---------- 7. 列表显示形态 ---------- */
-  await page.locator(".sidebar .el-menu-item", { hasText: "内容库" }).click();
+  await page.locator(".sidebar .el-menu-item").filter({ hasText: /^内容库$/ }).click();
   await sleep(600);
   const rowText = await page.locator(".el-table__body").innerText();
   check("列表显示公众号形态标签", /石墨极简风/.test(rowText), rowText.slice(0, 200));

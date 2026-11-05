@@ -1,14 +1,22 @@
 {
   "name": "notefly",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "private": true,
   "description": "NoteFly · 本地多平台内容分发工作台，单引擎：NoteFly RPA",
   "license": "MIT",
   "main": "electron/main.js",
+  "author": "liujh6666",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/liujh6666/notefly.git"
+  },
+  "homepage": "https://github.com/liujh6666/notefly",
   "scripts": {
     "start": "node server.js",
     "desktop": "electron .",
-    "test": "node --test tests/task-status.test.js tests/api-client.test.js tests/content-save.test.js tests/text-tools.test.js tests/text-tools-p0.test.js tests/text-diff.test.js tests/ai.test.js tests/ai-endpoint.test.js tests/gzh-render.test.js tests/data-dir.test.js tests/data-dir-p0.test.js tests/logger.test.js tests/server.test.js tests/server-p0.test.js tests/batch3.test.js tests/server-recovery.test.js",
+    "make:lnk": "node scripts/make-lnk.js",
+    "postinstall": "node scripts/make-lnk.js",
+    "test": "node --test tests/task-status.test.js tests/api-client.test.js tests/content-save.test.js tests/text-tools.test.js tests/text-tools-p0.test.js tests/text-diff.test.js tests/ai.test.js tests/ai-endpoint.test.js tests/gzh-render.test.js tests/data-dir.test.js tests/data-dir-p0.test.js tests/logger.test.js tests/server.test.js tests/server-p0.test.js tests/batch3.test.js tests/server-recovery.test.js tests/task-progress.test.js tests/messages.test.js tests/safe-fetch.test.js tests/article-extract.test.js tests/content-library.test.js tests/writing-context.test.js tests/updater.test.js",
     "test:ui": "node scripts/ui-smoke.js",
     "test:ai": "node scripts/ai-e2e.js",
     "test:gzh": "node scripts/gzh-e2e.js",
@@ -17,13 +25,83 @@
     "test:aikey:electron": "node scripts/ai-key-electron-check.js",
     "test:accounts": "node scripts/account-state-check.js && node scripts/login-judge-check.js",
     "test:log": "node scripts/log-check.js",
-    "test:log:electron": "node scripts/log-electron-check.js"
+    "test:log:electron": "node scripts/log-electron-check.js",
+    "test:library": "node scripts/library-e2e.js",
+    "test:progress": "node scripts/progress-e2e.js",
+    "test:update": "node scripts/update-e2e.js",
+    "test:tray": "node scripts/tray-electron-check.js",
+    "build": "electron-builder --win --x64",
+    "build:mac": "electron-builder --mac",
+    "build:dir": "electron-builder --dir",
+    "publish": "electron-builder --win --x64 --publish always"
   },
   "dependencies": {
+    "electron-updater": "^6.8.11",
     "express": "^4.21.0",
     "playwright": "^1.64.1"
   },
   "devDependencies": {
-    "electron": "^45.1.0"
+    "electron": "^45.1.0",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.notefly.desktop",
+    "productName": "NoteFly",
+    "copyright": "Copyright © 2026 NoteFly",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "lib/**/*",
+      "engines/**/*",
+      "public/**/*",
+      "server.js",
+      "package.json",
+      "!**/*.map"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "public/app.ico",
+      "artifactName": "NoteFly-${version}-${arch}-setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "NoteFly"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "category": "public.app-category.productivity",
+      "artifactName": "NoteFly-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Office",
+      "artifactName": "NoteFly-${version}-${arch}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "liujh6666",
+        "repo": "notefly",
+        "releaseType": "release"
+      }
+    ]
   }
 }

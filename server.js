@@ -13,8 +13,22 @@ const dataDir = require("./lib/data-dir");
 const logger = require("./lib/logger");
 const logHttp = require("./lib/log-http");
 const logRoutes = require("./lib/log-routes");
+const taskProgress = require("./lib/task-progress");
+const messages = require("./lib/messages");
+const progressRoutes = require("./lib/progress-routes");
+const library = require("./lib/content-library");
+const libraryRoutes = require("./lib/library-routes");
+const updateRoutes = require("./lib/update-routes");
 
 const PORT = process.env.PORT || 3210;
+/* 应用版本：与 package.json 保持一致（发布时同步） */
+const APP_VERSION = (() => {
+  try {
+    return require("./package.json").version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 /* 登录态快照的有效期：超过就降级成「待复核」。
    巡检结果是某一时刻的事实，不该永久当成现状展示。 */
 const ACCOUNT_STALE_MS = 12 * 60 * 60 * 1000;
@@ -42,6 +56,19 @@ process.on("unhandledRejection", (e) => {
   logger.fatal("异常", "未处理的 Promise 拒绝：" + String((e && e.message) || e), { 堆栈: e && e.stack ? String(e.stack).slice(0, 2000) : "" });
 });
 
+/* 数据目录切换后，这些模块的内存态必须重载，否则会出现「指针指向新目录、
+   内存还是旧数据」的错位（内容库与任务记录尤其明显）。 */
+function reloadDataModules() {
+  try { taskProgress.init(); } catch { /* 忽略 */ }
+  try { messages.init(); } catch { /* 忽略 */ }
+  try { library.init(); } catch { /* 忽略 */ }
+  /* 当前企业在新目录里可能不存在了 */
+  if (currentCompanyId && !library.getCompany(currentCompanyId)) {
+    currentCompanyId = "";
+    config.currentCompanyId = "";
+  }
+}
+
 /* ---------------- 存储层 ----------------
  * 三条硬规则：
  *  1. 写入先落临时文件再 rename —— 断电/崩溃不会留下半个 JSON；
@@ -49,7 +76,6 @@ process.on("unhandledRejection", (e) => {
  *  3. 解析失败不静默当空数据：把损坏文件另存 .corrupt-<时间>，并向上报告。
  */
 const dataWarnings = [];
-
 function backupCorrupt(file, err) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const dest = `${file}.corrupt-${stamp}`;
@@ -101,7 +127,11 @@ function saveJSON(file, data) {
 
 /* 配置与内容库的默认值。目录切换后会重新从新目录读取，并补齐缺失的键。 */
 function defaultConfig() {
-  return { engine: "rpa" };
+  return {
+    engine: "rpa",
+    /* 更新设置：仓库地址优先读这里的 update.repo，其次读 package.json */
+    update: { repo: "", allowPrerelease: false },
+  };
 }
 function defaultStore() {
   return {
@@ -122,6 +152,10 @@ function normalizeConfig(c) {
   /* AI 模型配置（Key 存在本地 config.json，绝不回传前端） */
   c.ai = c.ai || aiRoutes.defaultAiConfig();
   c.kaState = c.kaState || { lastRun: null, lastOnline: 0, lastTotal: 0, details: [], nextRun: null };
+  /* 更新设置：仓库地址与预发布开关 */
+  c.update = c.update && typeof c.update === "object" ? c.update : { repo: "", allowPrerelease: false };
+  if (typeof c.update.repo !== "string") c.update.repo = "";
+  c.update.allowPrerelease = !!c.update.allowPrerelease;
   /* 引擎已收敛为单一 RPA：老配置里的 multipost 一律归一，避免走到已下线的分支 */
   c.engine = "rpa";
   return c;
@@ -133,6 +167,29 @@ let store = normalizeStore(loadJSON(dataDir.storeFile(), defaultStore()));
 /* 写入路径每次求值：目录切换后必须写到新位置 */
 const saveStore = () => saveJSON(dataDir.storeFile(), store);
 const saveConfig = () => saveJSON(dataDir.configFile(), config);
+
+/* ---------------- 当前选中的企业内容库 ----------------
+ * 新建内容时「当前用哪个企业的资料」必须是显式的、用户能看见的。
+ * 这里保存当前选择（写进 config，跨重启保持），所有 AI 写作请求都带上它。
+ * 没选企业时为 null —— 此时写作明确按通用风格，不暗用任何企业资料。 */
+let currentCompanyId = config.currentCompanyId || "";
+function setCurrentCompany(id) {
+  const c = library.getCompany(id);
+  currentCompanyId = c ? c.id : "";
+  config.currentCompanyId = currentCompanyId;
+  try { saveConfig(); } catch { /* 落盘失败不影响本次会话 */ }
+  return currentCompanyId;
+}
+
+/* ---------------- 任务进度 / 消息中心 / 内容库 ----------------
+ * 启动时初始化：
+ *  - 任务记录：把上次进程「正在跑」的任务标成已中断（不能显示成还在转圈）
+ *  - 消息中心：加载已读状态与未读数
+ *  - 内容库：加载企业与文章
+ */
+taskProgress.init();
+messages.init();
+library.init();
 
 /* RPA 执行队列（内存）：同一时刻只执行一个发布任务，避免多任务争抢同一批浏览器页面。
    声明提前到此处：启动恢复逻辑在模块前部就要用它。 */
@@ -477,6 +534,10 @@ function logScope(req) {
   if (p.startsWith("/api/rpa/")) return "登录引擎";
   if (p.startsWith("/api/accounts")) return "账号";
   if (p.startsWith("/api/contents")) return "内容库";
+  if (p.startsWith("/api/library")) return "企业内容库";
+  if (p.startsWith("/api/progress")) return "任务进度";
+  if (p.startsWith("/api/messages")) return "消息中心";
+  if (p.startsWith("/api/update")) return "软件更新";
   if (p.startsWith("/api/media")) return "素材库";
   if (p.startsWith("/api/upload")) return "素材库";
   if (p.startsWith("/api/tasks")) return "发布任务";
@@ -522,15 +583,38 @@ app.get("/api/config", (req, res) => {
     /* 数据存储位置（当前目录 + 是否用了自定义目录） */
     dataDir: dataDir.get(),
     dataDirIsDefault: dataDir.isDefault(),
+    /* 版本号：界面各处显示用 */
+    version: APP_VERSION,
+    /* 更新设置：仓库地址与预发布开关（Key 类敏感信息不回传） */
+    update: {
+      repo: config.update.repo || "",
+      allowPrerelease: !!config.update.allowPrerelease,
+    },
     /* 数据文件损坏等启动告警：前端必须显式提示，不能静默用空库 */
     dataWarnings,
   });
 });
 app.post("/api/config", (req, res) => {
-  const { checkInterval, authorName, authorBio } = req.body || {};
+  const { checkInterval, authorName, authorBio, update } = req.body || {};
   if (Number(checkInterval) >= 5) config.checkInterval = Number(checkInterval);
   if (typeof authorName === "string") config.authorName = authorName.trim().slice(0, 40);
   if (typeof authorBio === "string") config.authorBio = authorBio.trim().slice(0, 80);
+  if (update && typeof update === "object") {
+    if (typeof update.repo === "string") {
+      const repo = update.repo.trim();
+      /* 空值合法（表示「不配置」）；非空时必须是 owner/repo 或 GitHub 链接 */
+      if (repo) {
+        const parsed = require("./lib/updater").parseRepo(repo);
+        if (!parsed) {
+          return res.status(400).json({ error: "仓库地址格式不正确，请填 owner/repo 或完整的 GitHub 仓库链接" });
+        }
+        config.update.repo = repo;
+      } else {
+        config.update.repo = "";
+      }
+    }
+    if (update.allowPrerelease !== undefined) config.update.allowPrerelease = !!update.allowPrerelease;
+  }
   try {
     saveConfig();
   } catch (e) {
@@ -596,6 +680,8 @@ app.post("/api/data-dir", async (req, res) => {
     /* 浏览器没开就算了，不影响切换本身 */
   }
 
+  reloadDataModules();
+
   logger.info("数据目录", `数据目录已切换：${from} → ${check.dir}`, { 已迁移: moved, 已跳过: skipped });
   res.json({
     ok: true,
@@ -637,8 +723,29 @@ app.post("/api/data-dir/reset", async (req, res) => {
     await rpa.resetContext();
   } catch {}
 
+  reloadDataModules();
+
   logger.info("数据目录", `数据目录已恢复默认：${from} → ${check.dir}`, { 已迁移: r.moved, 已跳过: r.skipped });
   res.json({ ok: true, dir: check.dir, from, moved: r.moved, skipped: r.skipped });
+});
+
+/* 当前选中的企业内容库：新建内容时显示它，AI 写作也用它 */
+app.get("/api/library/current", (req, res) => {
+  const c = currentCompanyId ? library.getCompany(currentCompanyId) : null;
+  res.json({
+    ok: true,
+    companyId: c ? c.id : "",
+    companyName: c ? c.name : "",
+    companies: library.listCompanies(),
+  });
+});
+app.post("/api/library/current", (req, res) => {
+  const id = String((req.body && req.body.companyId) || "");
+  const c = library.getCompany(id);
+  if (id && !c) return res.status(404).json({ error: "企业不存在" });
+  setCurrentCompany(id);
+  logger.info("企业内容库", c ? `切换当前企业为「${c.name}」` : "清除当前企业选择");
+  res.json({ ok: true, companyId: currentCompanyId, companyName: c ? c.name : "" });
 });
 
 /* RPA 引擎：平台列表 / 登录 */
@@ -1312,6 +1419,30 @@ app.post("/api/keepalive/run", async (req, res) => {
 aiRoutes.registerAiRoutes(app, {
   getConfig: () => config,
   saveConfig: () => saveConfig(),
+  /* 写作引用记录：内容库模块负责保存，便于追溯「这次用了哪些资料」 */
+  saveCitation: (companyId, citation) => library.saveCitation(companyId, citation),
+});
+
+/* ---------------- 企业内容库 ----------------
+ * 采集、风格档案、检索。详见 lib/library-routes.js。 */
+libraryRoutes.registerLibraryRoutes(app, {
+  getConfig: () => config,
+  getCurrentCompanyId: () => currentCompanyId,
+});
+
+/* ---------------- 任务进度与消息中心 ----------------
+ * 统一后台任务记录 + 右上角消息中心。详见 lib/progress-routes.js。 */
+progressRoutes.registerProgressRoutes(app, {
+  getCurrentCompanyId: () => currentCompanyId,
+});
+
+/* ---------------- 软件更新 ----------------
+ * GitHub Releases 检查、版本历史、跳过与下载/安装入口。详见 lib/update-routes.js。 */
+updateRoutes.registerUpdateRoutes(app, {
+  getConfig: () => config,
+  saveConfig: () => saveConfig(),
+  getVersion: () => APP_VERSION,
+  isDesktop: () => process.env.NOTEFLY_DESKTOP === "1",
 });
 
 /* ---------------- 公众号排版 ----------------
@@ -1325,11 +1456,51 @@ logRoutes.registerLogRoutes(app);
 /* ---------------- 启动 ----------------
  * 桌面版（electron/main.js）require 本文件时默认监听 3210；
  * 测试用 NOTEFLY_NO_LISTEN=1 只拿 app 实例，不起端口。 */
+
+/* 浏览器版启动后自动打开浏览器（端口就绪时）。
+   桌面版自己开窗口，不受这个开关影响。
+
+   ⚠ 这里**不能**用 `cmd /c start` 开浏览器：cmd.exe 是控制台程序，
+     Windows 11 会把它交给「默认终端应用」（本机是 Windows Terminal），
+     结果是在 Terminal 里开出一个**可见的 cmd 标签页**，而且 `start` 会
+     等到浏览器真正启动才返回 —— 实测这个标签页会挂在屏幕上十几秒。
+     改用 GUI 子系统程序唤起系统的 URL 协议处理器，全程零控制台窗口。 */
+function openBrowserWhenReady(url) {
+  try {
+    const { spawn } = require("child_process");
+    /* rundll32.exe 与 explorer.exe 都是 GUI 程序，不分配控制台。
+       先试 rundll32 的协议处理器（更直接），失败再退回 explorer。 */
+    const candidates = [
+      { cmd: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] },
+      { cmd: "explorer.exe", args: [url] },
+    ];
+    for (const c of candidates) {
+      try {
+        const child = spawn(c.cmd, c.args, {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        child.unref();
+        return;
+      } catch (e) {
+        /* 试下一个 */
+      }
+    }
+  } catch (e) {
+    /* 打不开浏览器不影响服务本身 */
+  }
+}
+
 function startServer(port) {
   /* 显式绑定回环地址：app.listen 不传 host 时会监听全部网卡（含局域网），
      本地接口没有鉴权，不能暴露给同网段其它设备（审查报告 P1 安全项） */
   return app.listen(port || PORT, "127.0.0.1", () => {
-    console.log(`Dispatch Hub 已启动: http://127.0.0.1:${port || PORT}`);
+    const url = `http://127.0.0.1:${port || PORT}`;
+    console.log(`Dispatch Hub 已启动: ${url}`);
+    if (process.env.NOTEFLY_OPEN_BROWSER === "1") {
+      openBrowserWhenReady(url);
+    }
   });
 }
 

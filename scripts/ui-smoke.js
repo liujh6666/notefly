@@ -120,7 +120,7 @@ async function waitReady(retries = 40) {
 
   /* 1. 界面渲染：Vue + Element Plus 正常挂载，菜单可见 */
   const menus = await page.locator(".sidebar .el-menu-item").count();
-  check("界面渲染：左侧菜单挂载（10 项）", menus === 10, `实际 ${menus}`);
+  check("界面渲染：左侧菜单挂载（11 项）", menus === 11, `实际 ${menus}`);
   /* 1.0 统计口径：未登录的平台占位不能算“已连接账号” */
   const dashText = await page.locator(".el-main").innerText().catch(() => "");
   check("统计卡片区分已登录与平台总数", /已登录账号/.test(dashText) && /个平台/.test(dashText), dashText.slice(0, 120).replace(/\s+/g, " "));
@@ -189,13 +189,13 @@ async function waitReady(retries = 40) {
   check("到点后界面自动同步了一次（到点唤醒生效）", after.count > before, `pollCount ${before} → ${after.count}`);
 
   /* 2. 新建内容并保存成功 */
-  await page.locator(".sidebar .el-menu-item", { hasText: "内容库" }).click();
+  await page.locator(".sidebar .el-menu-item").filter({ hasText: /^内容库$/ }).click();
   await sleep(300);
   await page.getByRole("button", { name: /新建内容/ }).click();
   await sleep(300);
   await page.locator(".ce-title input").fill("UI回归-标题");
   await page.locator(".ce-textarea").fill("# 小标题\n\n这是正文第一段。");
-  check("编辑器占满内容区（左侧菜单仍可见）", (await page.locator(".sidebar .el-menu-item").count()) === 10);
+  check("编辑器占满内容区（左侧菜单仍可见）", (await page.locator(".sidebar .el-menu-item").count()) === 11);
 
   await page.getByRole("button", { name: "保存", exact: true }).click();
   await sleep(900);

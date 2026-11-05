@@ -114,7 +114,7 @@ function check(name, cond, extra = "") {
   await page.screenshot({ path: "_export/key-settings.png" });
 
   /* 7. 断开后编辑器里的「AI 写作」按钮恢复灰态 */
-  await page.locator(".sidebar .el-menu-item", { hasText: "内容库" }).click();
+  await page.locator(".sidebar .el-menu-item").filter({ hasText: /^内容库$/ }).click();
   await sleep(500);
   await page.getByRole("button", { name: /新建内容/ }).click();
   await sleep(600);

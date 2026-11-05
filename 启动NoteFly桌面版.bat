@@ -1,14 +1,27 @@
 @echo off
-chcp 936 >nul
-title NoteFly 桌面版
+rem ============================================================
+rem  NoteFly launcher - desktop edition (compatibility entry).
+rem
+rem  A .bat is always executed by cmd.exe, and cmd.exe is a
+rem  console program: on Windows 11 the default terminal app
+rem  (Windows Terminal / ConPTY) hosts it, so a console window
+rem  shows up. Script level cannot remove that window - it can
+rem  only make it disappear again as fast as possible.
+rem
+rem  The zero-window entry is the shortcut with the SAME name
+rem  next to this file: double-click it directly and no console
+rem  window appears at all.
+rem
+rem  Keep this file pure ASCII, and never add "chcp 936" or
+rem  "pause" here:
+rem    - chcp 936 can hang forever under ConPTY;
+rem    - pause keeps the window on screen until a key is pressed;
+rem    - running the server in the foreground keeps it alive too.
+rem ============================================================
 cd /d "%~dp0"
-rem 部分环境会带 ELECTRON_RUN_AS_NODE，导致 Electron 被当作纯 Node 运行而启动失败
-set ELECTRON_RUN_AS_NODE=
-echo 正在启动 NoteFly 桌面版...
-echo 首次启动需要加载 Electron，请稍候（窗口约 10~20 秒出现）
-call npx electron .
-if errorlevel 1 (
-  echo.
-  echo [启动失败] 请把上面的报错信息截图反馈。
-  pause
+if exist "%~dp0%~n0.lnk" (
+  start "" "%~dp0%~n0.lnk"
+) else (
+  start "" "%~dp0node_modules\electron\dist\electron.exe" .
 )
+exit /b

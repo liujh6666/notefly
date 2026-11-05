@@ -78,7 +78,7 @@ async function waitReady(retries = 40) {
   await sleep(900);
 
   /* 先制造一些操作与报错，让日志里有东西可看 */
-  await page.locator(".sidebar .el-menu-item", { hasText: "内容库" }).click();
+  await page.locator(".sidebar .el-menu-item").filter({ hasText: /^内容库$/ }).click();
   await sleep(400);
   await page.getByRole("button", { name: /新建内容/ }).click();
   await sleep(400);

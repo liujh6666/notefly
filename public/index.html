@@ -34,6 +34,7 @@
 
         <div class="nav-group">内容</div>
         <el-menu-item index="contents"><el-icon><folder-opened /></el-icon><span>内容库</span></el-menu-item>
+        <el-menu-item index="library"><el-icon><collection /></el-icon><span>企业内容库</span></el-menu-item>
         <el-menu-item index="media"><el-icon><Files /></el-icon><span>素材库</span></el-menu-item>
 
         <div class="nav-group">分发</div>
@@ -75,8 +76,133 @@
             <span class="lamp" :class="{ ok: aiReady }"></span>
             <span class="engine-chip-text">{{ aiReady ? "AI 已接入" : "AI 未接入" }}</span>
           </div>
+          <!-- 消息中心：常驻图标 + 未读角标 -->
+          <button class="msg-bell" type="button" @click="openMsgDrawer"
+            :title="msgUnread ? ('消息中心：' + msgUnread + ' 条未读') : '消息中心'">
+            <el-icon><Bell /></el-icon>
+            <span class="msg-badge" v-if="msgUnread">{{ msgUnread > 99 ? "99+" : msgUnread }}</span>
+          </button>
         </div>
       </el-header>
+
+      <!-- 消息中心抽屉：不离开当前编辑页 -->
+      <el-drawer v-model="msgDrawer" direction="rtl" size="460px" :with-header="false" class="nf-drawer">
+        <div class="msg-head">
+          <div class="msg-tabs">
+            <button type="button" class="msg-tab" :class="{ on: msgTab === 'messages' }" @click="msgTab = 'messages'">
+              消息<span class="msg-tab-dot" v-if="msgUnread">{{ msgUnread }}</span>
+            </button>
+            <button type="button" class="msg-tab" :class="{ on: msgTab === 'running' }" @click="msgTab = 'running'">
+              进行中<span class="msg-tab-dot alt" v-if="activeTaskCount">{{ activeTaskCount }}</span>
+            </button>
+            <button type="button" class="msg-tab" :class="{ on: msgTab === 'updates' }" @click="msgTab = 'updates'">更新记录</button>
+          </div>
+          <el-button v-if="msgTab === 'messages' && msgUnread" size="small" text @click="markAllMsgRead">全部已读</el-button>
+          <el-button size="small" text @click="closeMsgDrawer">关闭</el-button>
+        </div>
+
+        <!-- 页签一：消息 -->
+        <div class="msg-body" v-show="msgTab === 'messages'">
+          <div class="msg-empty" v-if="!msgItems.length">暂无消息。采集、AI 生成、导出、发布与更新的结果都会汇总到这里。</div>
+          <div class="msg-item" v-for="m in msgItems" :key="m.id" :class="{ unread: !m.read }" @click="openMsg(m)">
+            <div class="msg-item-head">
+              <span class="msg-kind" :class="m.level">{{ msgKindLabel(m.type) }}</span>
+              <span class="msg-title">{{ m.title }}</span>
+              <span class="msg-time">{{ fmtMsgTime(m.at) }}</span>
+            </div>
+            <div class="msg-sum" v-if="m.summary">{{ m.summary }}</div>
+            <div class="msg-acts" v-if="m.action">
+              <el-button size="small" text type="primary" @click.stop="openMsg(m)">{{ m.action.label }}</el-button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 页签二：进行中 -->
+        <div class="msg-body" v-show="msgTab === 'running'">
+          <div class="msg-empty" v-if="!activeTasks.length">当前没有进行中的任务。</div>
+          <div class="msg-item" v-for="t in activeTasks" :key="t.id">
+            <div class="msg-item-head">
+              <span class="msg-kind info">{{ taskKindLabel(t.type) }}</span>
+              <span class="msg-title">{{ t.title }}</span>
+              <span class="msg-time">{{ taskElapsed(t) }}</span>
+            </div>
+            <div class="msg-sum">{{ t.stageNote || "执行中" }}</div>
+            <el-progress v-if="t.total !== null && t.total !== undefined && t.total > 0"
+              :percentage="taskPercent(t)" :stroke-width="6" :show-text="false" />
+            <div class="msg-sum" v-if="t.total !== null && t.total !== undefined && t.total > 0">
+              已处理 {{ t.completed }}/{{ t.total }}（{{ taskPercent(t) }}%）
+            </div>
+            <div class="msg-sum" v-else>
+              <span class="nf-eyebrow">不确定进度</span> · {{ t.stageNote || "执行中" }}
+            </div>
+            <div class="msg-acts">
+              <el-button size="small" text @click="gotoTask(t)">查看位置</el-button>
+              <el-button size="small" text type="danger" v-if="t.cancellable && t.status !== 'cancelling'"
+                @click="cancelTask(t)">取消</el-button>
+              <span class="muted" style="font-size: 11.5px" v-else-if="t.status === 'cancelling'">正在停止…</span>
+            </div>
+          </div>
+
+          <div class="msg-sub" v-if="finishedTasks.length">最近结束</div>
+          <div class="msg-item msg-item--dim" v-for="t in finishedTasks" :key="t.id">
+            <div class="msg-item-head">
+              <span class="msg-kind" :class="t.status === 'success' ? 'success' : (t.status === 'failed' ? 'error' : 'info')">
+                {{ taskStatusLabel(t.status) }}
+              </span>
+              <span class="msg-title">{{ t.title }}</span>
+              <span class="msg-time">{{ fmtMsgTime(t.updatedAt) }}</span>
+            </div>
+            <div class="msg-sum">{{ t.error || t.stageNote || "" }}</div>
+            <div class="msg-acts" v-if="t.error">
+              <el-button size="small" text type="primary" @click="gotoTask(t)">查看详情</el-button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 页签三：更新记录（版本时间轴） -->
+        <div class="msg-body" v-show="msgTab === 'updates'">
+          <div class="msg-update-head">
+            <div>
+              <div class="nf-eyebrow">当前运行版本</div>
+              <div class="msg-cur-ver">v{{ updateState.currentVersion || "—" }}</div>
+            </div>
+            <div class="grow"></div>
+            <el-button size="small" :loading="updateChecking" @click="checkUpdateNow">检查更新</el-button>
+          </div>
+          <div class="msg-note" v-if="updateState.lastCheckedAt">
+            上次检查：{{ fmtMsgTime(updateState.lastCheckedAt) }} ·
+            <span :class="updateState.lastResult === 'failed' ? 'nf-danger-text' : ''">
+              {{ updateResultText }}
+            </span>
+          </div>
+          <div class="msg-note" v-if="updateState.installedAt">
+            本机安装完成时间：{{ fmtMsgTime(updateState.installedAt) }}
+          </div>
+          <div class="msg-empty" v-if="!updateHistory.length">
+            {{ updateHistoryError || "暂无版本记录。" }}
+          </div>
+          <div class="tl" v-else>
+            <div class="tl-node" v-for="r in updateHistory" :key="r.version"
+              :class="{ cur: r.version === updateState.currentVersion, latest: r.version === latestAvailableVersion }">
+              <div class="tl-dot"></div>
+              <div class="tl-body">
+                <div class="tl-head">
+                  <span class="tl-ver">v{{ r.version }}</span>
+                  <el-tag size="small" type="success" effect="plain" v-if="r.version === updateState.currentVersion">当前运行</el-tag>
+                  <el-tag size="small" type="warning" effect="plain" v-else-if="r.version === latestAvailableVersion">最新可用</el-tag>
+                  <span class="tl-date">{{ fmtMsgTime(r.publishedAt) }}</span>
+                </div>
+                <div class="tl-name" v-if="r.name && r.name !== r.version">{{ r.name }}</div>
+                <div class="tl-notes" v-if="r.notes" v-html="renderNotes(r.notes)"></div>
+                <div class="tl-acts">
+                  <el-button size="small" text v-if="r.url" @click="openExternal(r.url)">打开发布页</el-button>
+                  <el-button size="small" text v-if="r.version !== updateState.currentVersion" @click="startUpdate(r)">立即更新</el-button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-drawer>
 
       <el-main class="main-area" :class="{ editing: page === 'editor' }">
         <!-- 工作台 -->
@@ -347,6 +473,270 @@
               </el-table-column>
             </el-table>
           </el-card>
+        </template>
+
+        <!-- 企业内容库 -->
+        <template v-if="page === 'library'">
+          <div class="page-head nf-enter nf-enter-1">
+            <div>
+              <div class="page-head-desc">
+                按企业隔离的资料空间：采集文章、分析写作风格，写作时自动检索这里的资料
+              </div>
+            </div>
+            <div class="nf-row">
+              <el-button size="small" @click="openCompanyDialog()">新建企业</el-button>
+              <el-button size="small" type="primary" :disabled="!libCompanyId" @click="openCollectDialog()">导入文章</el-button>
+            </div>
+          </div>
+
+          <el-alert v-if="!libCompanies.length" type="info" :closable="false" show-icon
+            title="还没有企业内容库"
+            description="先新建一个企业，再把企业公众号文章或公开文章链接粘进来。资料、风格档案与写作引用都按企业隔离，不会串到别的企业。"></el-alert>
+
+          <div v-else class="lib-wrap nf-enter nf-enter-2">
+            <aside class="lib-side">
+              <div class="lib-side-title">企业</div>
+              <div class="lib-company" v-for="c in libCompanies" :key="c.id"
+                :class="{ on: c.id === libCompanyId }" @click="selectCompany(c.id)">
+                <div class="lib-company-name">{{ c.name }}</div>
+                <div class="lib-company-meta">{{ c.usableCount }} 篇可用 · 风格 v{{ c.styleVersion }}</div>
+              </div>
+            </aside>
+
+            <section class="lib-main">
+              <el-tabs v-model="libTab" class="lib-tabs">
+                <el-tab-pane label="文章" name="articles">
+                  <div class="lib-toolbar">
+                    <el-input v-model="libKeyword" placeholder="搜索标题 / 正文 / 标签" prefix-icon="Search" clearable
+                      style="width: 260px" @change="loadLibArticles"></el-input>
+                    <el-select v-model="libTypeFilter" placeholder="内容类型" clearable style="width: 150px" @change="loadLibArticles">
+                      <el-option v-for="t in libContentTypes" :key="t.id" :label="t.name" :value="t.id"></el-option>
+                    </el-select>
+                    <el-button size="small" @click="loadLibArticles">刷新</el-button>
+                    <span class="grow"></span>
+                    <span class="nf-dim" v-if="libStats">
+                      共 {{ libStats.total }} 篇 · 可用 {{ libStats.usable }} · 需补录 {{ libStats.manual }} · 失败 {{ libStats.failed }}
+                    </span>
+                  </div>
+
+                  <el-table :data="libArticles" style="width: 100%" empty-text="这个企业还没有文章 —— 点右上角「导入文章」">
+                    <el-table-column label="标题" min-width="220">
+                      <template #default="{ row }">
+                        <div class="strong">{{ row.title || "(无标题)" }}</div>
+                        <div class="muted" style="font-size: 11.5px">
+                          <span v-if="row.author">作者：{{ row.author }}</span>
+                          <span v-else>作者：未知</span>
+                          ·
+                          <span v-if="row.publishedAt">发布：{{ fmt(row.publishedAt) }}</span>
+                          <span v-else>发布时间：未知</span>
+                        </div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="采集" width="100">
+                      <template #default="{ row }">
+                        <el-tag size="small" :type="collectTagType(row.collectStatus)" effect="plain">
+                          {{ collectStatusLabel(row.collectStatus) }}
+                        </el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="分析" width="90">
+                      <template #default="{ row }">
+                        <el-tag size="small" :type="row.analyzeStatus === 'success' ? 'success' : 'info'" effect="plain">
+                          {{ row.analyzeStatus === 'success' ? "已分析" : (row.analyzeStatus === "failed" ? "分析失败" : "未分析") }}
+                        </el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="类型" width="100">
+                      <template #default="{ row }">
+                        <el-tag size="small" effect="plain">{{ contentTypeName(row.contentType) }}</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="版本" width="70">
+                      <template #default="{ row }"><span class="muted">v{{ row.version }}</span></template>
+                    </el-table-column>
+                    <el-table-column label="参考" width="80">
+                      <template #default="{ row }">
+                        <el-tag size="small" :type="row.excluded ? 'info' : (row.exemplar ? 'warning' : 'info')" effect="plain">
+                          {{ row.excluded ? "已排除" : (row.exemplar ? "优秀范文" : "普通") }}
+                        </el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="操作" width="200">
+                      <template #default="{ row }">
+                        <el-button size="small" text @click="openArticleDetail(row)">查看</el-button>
+                        <el-button size="small" text @click="toggleExemplar(row)">{{ row.exemplar ? "取消范文" : "设为范文" }}</el-button>
+                        <el-button size="small" text @click="toggleExclude(row)">{{ row.excluded ? "恢复参考" : "排除" }}</el-button>
+                        <el-button size="small" text type="danger" @click="delLibArticle(row)">删除</el-button>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </el-tab-pane>
+
+                <el-tab-pane label="写作风格" name="style">
+                  <div class="lib-toolbar">
+                    <el-button size="small" type="primary" :loading="libAnalyzing" @click="analyzeStyle">重新分析风格</el-button>
+                    <span class="grow"></span>
+                    <span class="nf-dim" v-if="libStyle">档案版本 v{{ libStyle.version }} · {{ libStyle.sufficiency && libStyle.sufficiency.message }}</span>
+                  </div>
+
+                  <el-alert v-if="libStyle && libStyle.sufficiency && !libStyle.sufficiency.enough" type="warning" :closable="false" show-icon
+                    :title="libStyle.sufficiency.message"></el-alert>
+
+                  <el-empty v-if="!libStyle" description="还没有风格档案 —— 点「重新分析风格」，从已可用的文章里提取表达习惯"></el-empty>
+
+                  <div v-else class="style-grid">
+                    <el-card shadow="never">
+                      <div class="card-title">表达习惯</div>
+                      <div class="style-kv"><span>语气</span><b>{{ (libStyle.style && libStyle.style.tone) || "未知" }}</b></div>
+                      <div class="style-kv"><span>句长</span><b>{{ libStyle.style.sentenceLength.avg }} 字（区间 {{ libStyle.style.sentenceLength.min }}–{{ libStyle.style.sentenceLength.max }}）</b></div>
+                      <div class="style-kv"><span>段落长度</span><b>{{ libStyle.style.paragraphLength.avg }} 字</b></div>
+                      <div class="style-kv"><span>信息密度</span><b>{{ libStyle.style.infoDensity }}</b></div>
+                      <div class="style-kv" v-if="libStyle.style.audience"><span>目标读者</span><b>{{ libStyle.style.audience }}</b></div>
+                      <div class="style-kv" v-if="libStyle.style.selfNaming"><span>品牌称谓</span><b>{{ libStyle.style.selfNaming.join("、") }}</b></div>
+                      <div class="style-kv" v-if="libStyle.style.organization"><span>正文组织</span><b>{{ libStyle.style.organization }}</b></div>
+                      <div class="style-kv" v-if="libStyle.style.openingPattern"><span>常见开头</span><b>{{ libStyle.style.openingPattern }}</b></div>
+                      <div class="style-kv" v-if="libStyle.style.endingPattern"><span>常见结尾</span><b>{{ libStyle.style.endingPattern }}</b></div>
+                      <div class="style-sub">常用术语</div>
+                      <div class="tag-wrap">
+                        <el-tag v-for="t in (libStyle.style.terms || []).slice(0, 20)" :key="t.term" size="small" effect="plain">{{ t.term }} · {{ t.count }}</el-tag>
+                        <span class="muted" v-if="!(libStyle.style.terms || []).length">暂无</span>
+                      </div>
+                      <div class="style-sub">不宜使用的表达</div>
+                      <div class="tag-wrap">
+                        <el-tag v-for="t in (libStyle.style.bannedExpressions || []).slice(0, 20)" :key="t.phrase" size="small" type="warning" effect="plain">{{ t.phrase }}</el-tag>
+                        <span class="muted" v-if="!(libStyle.style.bannedExpressions || []).length">暂无</span>
+                      </div>
+                      <div class="style-sub">品牌露出习惯</div>
+                      <div class="style-bh" v-for="(b, i) in (libStyle.style.brandHabits || [])" :key="i">
+                        <b>{{ b.label }}</b>（出现 {{ b.count }} 次）
+                        <div class="muted" style="font-size: 11.5px" v-if="b.example">例：{{ b.example }}</div>
+                        <div class="muted" style="font-size: 11.5px" v-if="b.sourceTitle">出处：《{{ b.sourceTitle }}》</div>
+                      </div>
+                    </el-card>
+
+                    <el-card shadow="never">
+                      <div class="card-title">企业事实（与表达习惯分开保存）</div>
+                      <div class="muted" style="font-size: 12px; margin-bottom: 8px">
+                        {{ libStyle.facts.note }}
+                      </div>
+                      <div class="style-facts">
+                        <div class="style-fact" v-for="(f, i) in (libStyle.facts.confirmed || [])" :key="i">
+                          <span>{{ f.text }}</span>
+                          <el-button size="small" text type="danger" @click="removeFact(i)">删除</el-button>
+                        </div>
+                        <div class="nf-row">
+                          <el-input v-model="factInput" placeholder="添加一条已确认的当前事实" size="small" style="width: 320px" @keyup.enter="addFact"></el-input>
+                          <el-button size="small" @click="addFact">添加</el-button>
+                        </div>
+                      </div>
+                    </el-card>
+                  </div>
+                </el-tab-pane>
+
+                <el-tab-pane label="检索" name="search">
+                  <div class="lib-toolbar">
+                    <el-input v-model="libQuery" placeholder="输入主题，检索企业资料" prefix-icon="Search" clearable
+                      style="width: 320px" @keyup.enter="runLibSearch"></el-input>
+                    <el-button size="small" type="primary" @click="runLibSearch">检索</el-button>
+                    <span class="grow"></span>
+                    <span class="nf-dim" v-if="libSearchHits">命中 {{ libSearchHits.length }} 篇</span>
+                  </div>
+                  <el-empty v-if="!libSearchHits.length" description="输入关键词检索这个企业的资料。检索只在本企业内部进行，不会跨企业 borrowing。"></el-empty>
+                  <div class="lib-hit" v-for="h in libSearchHits" :key="h.articleId">
+                    <div class="lib-hit-head">
+                      <b>{{ h.title }}</b>
+                      <el-tag size="small" effect="plain">{{ contentTypeName(h.contentType) }}</el-tag>
+                      <span class="muted" style="font-size: 11.5px">相关度 {{ h.score }}</span>
+                    </div>
+                    <div class="lib-hit-ex">{{ h.excerpt }}</div>
+                    <div class="muted" style="font-size: 11.5px" v-if="h.sourceUrl">
+                      来源：<a :href="h.sourceUrl" target="_blank" rel="noopener noreferrer">{{ h.sourceUrl }}</a>
+                    </div>
+                  </div>
+                </el-tab-pane>
+
+                <el-tab-pane label="引用记录" name="citations">
+                  <el-table :data="libCitations" style="width: 100%" empty-text="还没有生成记录">
+                    <el-table-column label="时间" width="170">
+                      <template #default="{ row }"><span class="muted">{{ fmt(row.at) }}</span></template>
+                    </el-table-column>
+                    <el-table-column label="操作" width="100">
+                      <template #default="{ row }">{{ row.action }}</template>
+                    </el-table-column>
+                    <el-table-column label="主题" min-width="200">
+                      <template #default="{ row }">{{ row.topic || "—" }}</template>
+                    </el-table-column>
+                    <el-table-column label="风格版本" width="90">
+                      <template #default="{ row }">v{{ row.styleVersion }}</template>
+                    </el-table-column>
+                    <el-table-column label="引用资料" min-width="240">
+                      <template #default="{ row }">
+                        <span class="muted">{{ (row.snapshot || []).map(s => s.title).join("、") || "—" }}</span>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </el-tab-pane>
+              </el-tabs>
+            </section>
+          </div>
+
+          <!-- 新建企业 -->
+          <el-dialog v-model="companyDialog" title="新建企业内容库" width="460px">
+            <el-form label-width="76px">
+              <el-form-item label="企业名称">
+                <el-input v-model="companyForm.name" placeholder="例如：某某科技"></el-input>
+              </el-form-item>
+              <el-form-item label="说明">
+                <el-input v-model="companyForm.description" type="textarea" :rows="3"
+                  placeholder="这个企业的业务方向、目标读者等（选填）"></el-input>
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="companyDialog = false">取消</el-button>
+              <el-button type="primary" :loading="companyBusy" @click="saveCompany">创建</el-button>
+            </template>
+          </el-dialog>
+
+          <!-- 导入文章 -->
+          <el-dialog v-model="collectDialog" title="导入企业文章" width="560px">
+            <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px"
+              title="粘贴一条或多条文章链接"
+              description="首版支持微信公众号文章与普通公开文章页面。采集失败时可以在文章列表里打开原文，手动粘贴正文补录。"></el-alert>
+            <el-input v-model="collectUrls" type="textarea" :rows="7"
+              placeholder="每行一个链接，例如：&#10;https://mp.weixin.qq.com/s/xxxx"></el-input>
+            <div class="nf-row" style="margin-top: 12px">
+              <el-checkbox v-model="collectUseAI">采集后自动分析文章（摘要与标签）</el-checkbox>
+            </div>
+            <template #footer>
+              <el-button @click="collectDialog = false">取消</el-button>
+              <el-button type="primary" :loading="collectBusy" @click="startCollect">开始采集</el-button>
+            </template>
+          </el-dialog>
+
+          <!-- 文章详情 / 手动补录 -->
+          <el-dialog v-model="articleDialog" :title="libArticle ? libArticle.title : '文章'" width="720px" top="6vh">
+            <template v-if="libArticle">
+              <div class="nf-row" style="margin-bottom: 10px">
+                <el-tag size="small" effect="plain">{{ collectStatusLabel(libArticle.collectStatus) }}</el-tag>
+                <el-tag size="small" effect="plain">v{{ libArticle.version }}</el-tag>
+                <span class="muted" style="font-size: 12px" v-if="libArticle.sourceUrl">
+                  来源：<a :href="libArticle.sourceUrl" target="_blank" rel="noopener noreferrer">{{ libArticle.sourceUrl }}</a>
+                </span>
+                <span class="grow"></span>
+                <el-button size="small" @click="recrawlArticle">重新采集</el-button>
+                <el-button size="small" @click="reanalyzeArticle">重新分析</el-button>
+              </div>
+              <el-alert v-if="libArticle.collectStatus !== 'success'" type="warning" :closable="false" show-icon
+                style="margin-bottom: 10px"
+                :title="'没能自动采集到正文'"
+                description="可以打开上面的原文链接，复制正文粘贴到下面手动补录。补录后仍会关联这个来源链接。"></el-alert>
+              <el-input v-model="libArticleBody" type="textarea" :rows="16" placeholder="正文（可编辑后保存，会创建新版本）"></el-input>
+            </template>
+            <template #footer>
+              <el-button @click="articleDialog = false">关闭</el-button>
+              <el-button type="primary" :loading="articleSaving" @click="saveArticleBody">保存正文</el-button>
+            </template>
+          </el-dialog>
         </template>
 
         <!-- 素材库 -->
@@ -676,6 +1066,59 @@
               </el-card>
             </div>
 
+            <div class="set-group"><div class="set-group-name">软件更新</div>
+              <el-card shadow="never">
+                <div class="set-row">
+                  <el-icon class="set-ico"><Refresh /></el-icon>
+                  <div class="grow">
+                    <div class="strong">当前版本 v{{ cfg.version || "—" }}</div>
+                    <div class="muted">
+                      上次检查：{{ updateState.lastCheckedAt ? fmt(updateState.lastCheckedAt) : "从未检查" }} ·
+                      {{ updateResultText }}
+                    </div>
+                  </div>
+                  <el-button size="small" :loading="updateChecking" @click="checkUpdateNow">检查更新</el-button>
+                </div>
+                <div class="set-row">
+                  <el-icon class="set-ico"><Link /></el-icon>
+                  <div class="grow">
+                    <div class="strong">更新仓库</div>
+                    <div class="muted">
+                      留空则使用 package.json 里配置的仓库。
+                      当前来源：{{ updateState.repo ? (updateState.repo.owner + "/" + updateState.repo.repo) : "未配置" }}
+                      <span v-if="updateState.repo && updateState.repo.source">（{{ updateState.repo.source }}）</span>
+                    </div>
+                  </div>
+                  <el-input v-model="updateRepoInput" placeholder="owner/repo" style="width: 200px"></el-input>
+                  <el-button size="small" @click="saveUpdateRepo">保存</el-button>
+                </div>
+                <div class="set-row">
+                  <el-icon class="set-ico"><SetUp /></el-icon>
+                  <div class="grow">
+                    <div class="strong">允许预发布版本</div>
+                    <div class="muted">默认只升级正式版。打开后检查更新会把预发布版本也算进来</div>
+                  </div>
+                  <el-switch v-model="updateAllowPrerelease" @change="saveUpdateRepo"></el-switch>
+                </div>
+                <el-alert v-if="updateAvailable" type="info" :closable="false" show-icon style="margin-top: 10px">
+                  <template #title>
+                    发现新版本 v{{ updateAvailable.version }}（当前 v{{ cfg.version }}）
+                  </template>
+                  <div class="nf-row" style="margin-top: 8px">
+                    <el-button size="small" type="primary" @click="startUpdate(updateAvailable)">立即更新</el-button>
+                    <el-button size="small" @click="skipUpdate(updateAvailable.version)">跳过此版本</el-button>
+                    <el-button size="small" text @click="msgTab = 'updates'; openMsgDrawer()">在消息中心查看</el-button>
+                  </div>
+                  <div class="muted" style="font-size: 12px; margin-top: 6px" v-if="updateAvailable.asset">
+                    安装包：{{ updateAvailable.asset.name }}（{{ fmtSize(updateAvailable.asset.size) }}）
+                  </div>
+                  <div class="nf-danger-text" style="font-size: 12px; margin-top: 6px" v-if="updateAvailable.assetError">
+                    {{ updateAvailable.assetError }}
+                  </div>
+                </el-alert>
+              </el-card>
+            </div>
+
             <div class="set-group"><div class="set-group-name">通用设置</div>
               <el-card shadow="never">
                 <div class="set-row">
@@ -684,9 +1127,20 @@
                   <el-switch v-model="themeDark" @change="toggleTheme"></el-switch>
                 </div>
                 <div class="set-row">
-                  <el-icon class="set-ico"><switch-button /></el-icon>
+                  <el-icon class="set-ico"><SwitchButton /></el-icon>
                   <div class="grow"><div class="strong">关闭所有浏览器窗口</div><div class="muted">一键关闭 RPA 引擎打开的所有平台页面</div></div>
                   <el-button size="small" @click="closeAllWindows">关闭</el-button>
+                </div>
+                <div class="set-row" v-if="isElectron">
+                  <el-icon class="set-ico"><Hide /></el-icon>
+                  <div class="grow">
+                    <div class="strong">关闭主窗口时</div>
+                    <div class="muted">默认隐藏到系统托盘，应用继续在后台运行；也可以改成直接退出软件</div>
+                  </div>
+                  <el-select v-model="closeBehavior" style="width: 160px" @change="saveCloseBehavior">
+                    <el-option label="隐藏到托盘" value="hide"></el-option>
+                    <el-option label="退出软件" value="quit"></el-option>
+                  </el-select>
                 </div>
                 <div class="set-row">
                   <el-icon class="set-ico"><Delete /></el-icon>
@@ -828,6 +1282,53 @@
                 <el-input v-model="ceForm.digest" placeholder="摘要（公众号/文章类，选填）"></el-input>
                 <el-input v-model="ceForm.tagsStr" placeholder="标签，逗号分隔" style="max-width: 300px"></el-input>
               </div>
+            </div>
+
+            <!-- 当前企业内容库：新建内容时明确显示用的是哪家的资料 -->
+            <div class="ce-lib">
+              <el-icon><collection /></el-icon>
+              <span class="muted">当前企业内容库</span>
+              <el-select v-model="curCompanyId" size="small" style="width: 190px" placeholder="不启用（按通用风格写作）" @change="switchCompany">
+                <el-option label="不启用（按通用风格写作）" value=""></el-option>
+                <el-option v-for="c in libCompanies" :key="c.id" :label="c.name" :value="c.id"></el-option>
+              </el-select>
+              <span class="muted" style="font-size: 12px" v-if="curCompanyId">
+                AI 起稿 / 续写 / 改写会检索这个企业的资料与风格档案
+              </span>
+              <!-- 本次参考资料：放在编辑辅助区，默认不混入正文 -->
+              <el-popover placement="bottom-start" :width="520" trigger="click" @show="loadRefs">
+                <template #reference>
+                  <el-button size="small" text type="primary">
+                    本次参考资料<el-badge v-if="refsCount" :value="refsCount" class="ref-badge" type="primary" />
+                  </el-button>
+                </template>
+                <div class="refs-pop">
+                  <div class="nf-eyebrow" v-if="refsMeta">企业：{{ refsMeta.companyName }} · 风格档案 v{{ refsMeta.styleVersion }}</div>
+                  <div class="muted" style="font-size: 12px" v-if="refsMeta && refsMeta.note">{{ refsMeta.note }}</div>
+                  <div class="refs-sec" v-if="refsMeta && refsMeta.materials && refsMeta.materials.length">资料片段</div>
+                  <div class="refs-item" v-for="m in (refsMeta ? refsMeta.materials : [])" :key="m.sourceId">
+                    <div class="refs-item-head">
+                      <span class="refs-sid">{{ m.sourceId }}</span>
+                      <b>{{ m.title }}</b>
+                      <a v-if="m.sourceUrl" :href="m.sourceUrl" target="_blank" rel="noopener noreferrer" class="refs-link">原文</a>
+                    </div>
+                    <div class="refs-ex">{{ m.excerpt }}</div>
+                  </div>
+                  <div class="refs-sec" v-if="refsMeta && refsMeta.exemplars && refsMeta.exemplars.length">表达范例</div>
+                  <div class="refs-item" v-for="e in (refsMeta ? refsMeta.exemplars : [])" :key="e.sourceId">
+                    <div class="refs-item-head">
+                      <span class="refs-sid alt">{{ e.sourceId }}</span>
+                      <b>{{ e.title }}</b>
+                    </div>
+                    <div class="refs-ex">{{ e.excerpt }}</div>
+                  </div>
+                  <div class="refs-sec nf-danger-text" v-if="refsMeta && refsMeta.missingFacts && refsMeta.missingFacts.length">
+                    待补关键事实：{{ refsMeta.missingFacts.join("、") }}
+                  </div>
+                  <el-empty v-if="!refsMeta || (!refsMeta.materials.length && !refsMeta.exemplars.length)"
+                    description="本次还没有引用企业资料" :image-size="48"></el-empty>
+                </div>
+              </el-popover>
             </div>
 
             <!-- 公众号排版栏：仅「微信公众号文章」形态显示 -->
@@ -1394,6 +1895,30 @@ const app = createApp({
       logUnlockHint: false, // 连点过程中的轻提示（点够 5 次后消失）
       logVisible: false,    // 日志弹窗
       logEntries: [], logStats: null, logLevel: "info", logKeyword: "", logBusy: false, logAuto: false,
+      /* ---------- 消息中心 / 全局进度 ---------- */
+      msgDrawer: false, msgTab: "messages",
+      msgItems: [], msgUnread: 0,
+      allTasks: [], activeTaskCount: 0,
+      /* ---------- 软件更新 ---------- */
+      updateState: { currentVersion: "", lastCheckedAt: "", lastResult: "idle", lastError: "", repo: null, installedAt: "", installedVersion: "" },
+      updateHistory: [], updateHistoryError: "", updateChecking: false, updateAvailable: null,
+      updateRepoInput: "", updateAllowPrerelease: false,
+      /* ---------- 桌面版生命周期 ---------- */
+      closeBehavior: "hide",
+      /* ---------- 企业内容库 ---------- */
+      libCompanies: [], libCompanyId: "", libTab: "articles",
+      libArticles: [], libStats: null, libContentTypes: [], libKeyword: "", libTypeFilter: "",
+      libStyle: null, libAnalyzing: false, libQuery: "", libSearchHits: [], libCitations: [],
+      companyDialog: false, companyForm: { name: "", description: "" }, companyBusy: false,
+      collectDialog: false, collectUrls: "", collectUseAI: true, collectBusy: false,
+      articleDialog: false, libArticle: null, libArticleBody: "", articleSaving: false,
+      factInput: "",
+      /* 当前企业（编辑器与 AI 写作共用） */
+      curCompanyId: "",
+      /* 是否严格要求使用企业资料（资料不足就报错而不是降级） */
+      useLibraryStrict: true,
+      /* 本次参考资料（编辑辅助区，不混入正文） */
+      refsMeta: null,
     });
 
     const typeLabels = { ARTICLE: "文章", DYNAMIC: "图文动态", VIDEO: "视频", PODCAST: "播客" };
@@ -2046,11 +2571,39 @@ const app = createApp({
         if (!String(body.text || "").trim()) return ElMessage.warning("没有可处理的内容");
       }
       state.aiBusy = true;
-      const r = await api("/ai/run", { method: "POST", timeoutMs: 300000, body: Object.assign({ action }, body) });
+      /* 带上当前企业：起稿/续写/改写都会走服务端的「内容库上下文」流程 */
+      const reqBody = Object.assign({ action }, body);
+      reqBody.companyId = state.curCompanyId || "";
+      reqBody.contentId = (state.ceForm && state.ceForm.id) || "";
+      reqBody.contentTitle = (state.ceForm && state.ceForm.title) || "";
+      /* 用户明确要求使用企业资料时，资料不足要报错而不是悄悄降级 */
+      reqBody.useLibrary = !!state.curCompanyId && !!state.useLibraryStrict;
+      const r = await api("/ai/run", { method: "POST", timeoutMs: 300000, body: reqBody });
       state.aiBusy = false;
-      if (!r.ok) return ElMessage.error(r.error || "生成失败");
+      if (!r.ok) {
+        /* 资料不足 → 明确提示，让用户选择补资料还是按通用风格写 */
+        if (r.needConfirmation) {
+          await ElMessageBox.confirm(
+            r.error + "\n\n可以：① 关闭本提示后按通用风格写作；② 到「企业内容库」补充资料后重试。",
+            "企业资料不足",
+            { type: "warning", confirmButtonText: "按通用风格写作", cancelButtonText: "去补充资料" }
+          ).then(async () => {
+            /* 用户明确选择「按通用风格写作」→ 不带企业资料重试 */
+            state.useLibraryStrict = false;
+            await runAi();
+          }).catch(async () => {
+            state.page = "library";
+            await loadCompanies();
+            if (state.curCompanyId) await selectCompany(state.curCompanyId);
+          });
+          return;
+        }
+        return ElMessage.error(r.error || "生成失败");
+      }
       state.aiResult = r.content || "";
       state.aiTitle = action === "write" ? (r.title || "") : "";
+      /* 本次参考资料：存进编辑辅助区，不混入正文 */
+      state.refsMeta = r.references || null;
       const names = { write: "生成的文章", continue: "续写内容", rewrite: "改写结果", deai: "深度去 AI 味结果" };
       state.aiResultTitle = names[action] || "生成结果";
       state.aiResultMeta = (r.model || "") + (r.usage && r.usage.total_tokens ? " · " + r.usage.total_tokens + " tokens" : "");
@@ -2381,6 +2934,595 @@ const app = createApp({
       state.accountsOutdated = a.outdated || 0;
       /* 数据刷新后重排到点唤醒：新建的定时任务要能被及时唤醒 */
       if (nextScheduledAt()) scheduleWake();
+    }
+
+    /* ================================================================
+     * 消息中心 / 全局进度
+     * ------------------------------------------------------------
+     * 消息与任务用两条路同步：
+     *   1. SSE（/api/progress/stream）—— 实时，事件驱动
+     *   2. 有界轮询 —— SSE 连不上时的兜底
+     * 两条路读的是同一份服务端状态，不会出现两套数据打架。
+     * ================================================================ */
+
+    let msgStream = null;
+    let msgPollTimer = null;
+
+    /* 打开抽屉：离开当前编辑页吗？不离开 —— 抽屉是覆盖层 */
+    function openMsgDrawer() {
+      state.msgDrawer = true;
+      loadMessages();
+      loadTasks();
+      if (state.msgTab === "updates") loadUpdateHistory();
+    }
+    function closeMsgDrawer() {
+      state.msgDrawer = false;
+    }
+
+    /* 加载消息 */
+    async function loadMessages() {
+      const r = await api("/messages?limit=60");
+      if (!r.ok) return;
+      state.msgItems = r.items || [];
+      state.msgUnread = r.unread || 0;
+    }
+
+    /* 加载任务（进行中 + 最近结束） */
+    async function loadTasks() {
+      const r = await api("/progress/tasks?limit=60");
+      if (!r.ok) return;
+      state.allTasks = r.tasks || [];
+    }
+
+    /* 进行中的任务 */
+    const activeTasks = computed(() => state.allTasks.filter((t) =>
+      ["pending", "running", "cancelling"].includes(t.status)));
+    const finishedTasks = computed(() => state.allTasks.filter((t) =>
+      ["success", "failed", "cancelled", "interrupted"].includes(t.status)).slice(0, 12));
+
+    /* 进度百分比：总量未知时返回 null（显示不确定进度，不伪造百分比） */
+    function taskPercent(t) {
+      if (!t || t.total === null || t.total === undefined || !t.total) return null;
+      return Math.max(0, Math.min(100, Math.round((t.completed / t.total) * 100)));
+    }
+
+    /* 已耗时（秒 → 人话） */
+    function taskElapsed(t) {
+      const s = t && t.startedAt ? (Date.now() - new Date(t.startedAt).getTime()) / 1000 : 0;
+      if (!s || s < 0) return "";
+      if (s < 60) return Math.round(s) + " 秒";
+      if (s < 3600) return Math.round(s / 60) + " 分钟";
+      return (s / 3600).toFixed(1) + " 小时";
+    }
+
+    const taskKindLabel = (type) => ({
+      collect: "采集", analysis: "分析", generate: "生成", publish: "发布",
+      update: "更新", export: "导出", account: "账号", system: "系统", generic: "任务",
+    }[type] || "任务");
+
+    const taskStatusLabel = (s) => ({
+      success: "已完成", failed: "失败", cancelled: "已取消", interrupted: "已中断",
+    }[s] || s);
+
+    const msgKindLabel = (type) => ({
+      update: "更新", collect: "采集", analysis: "分析", generate: "生成",
+      export: "导出", publish: "发布", account: "账号", system: "系统", error: "错误",
+    }[type] || "消息");
+
+    const collectStatusLabel = (s) => ({
+      pending: "待采集", success: "已采集", failed: "采集失败", manual: "手动补录",
+    }[s] || s);
+
+    const collectTagType = (s) => ({
+      success: "success", failed: "danger", manual: "warning", pending: "info",
+    }[s] || "info");
+
+    const contentTypeName = (id) => {
+      const t = (state.libContentTypes || []).find((x) => x.id === id);
+      return t ? t.name : (id || "—");
+    };
+
+    /* 时间显示：统一按本地时区 */
+    function fmtMsgTime(iso) {
+      if (!iso) return "-";
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "-";
+      const p = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+
+    /* 字节 → 可读大小 */
+    function fmtSize(bytes) {
+      const n = Number(bytes) || 0;
+      if (!n) return "未知大小";
+      if (n < 1024) return n + " B";
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+      return (n / 1024 / 1024).toFixed(1) + " MB";
+    }
+
+    /* 点击消息：标记已读 + 执行操作入口 */
+    async function openMsg(m) {
+      if (!m) return;
+      if (!m.read) {
+        await api("/messages/" + m.id + "/read", { method: "POST" });
+        m.read = true;
+        state.msgUnread = Math.max(0, state.msgUnread - 1);
+      }
+      const act = m.action;
+      if (!act) return;
+      if (act.kind === "navigate") {
+        const p = act.payload || {};
+        if (p.page === "library") {
+          state.page = "library";
+          if (p.companyId) selectCompany(p.companyId);
+          if (p.articleId) {
+            const art = state.libArticles.find((a) => a.id === p.articleId);
+            if (art) openArticleDetail(art);
+          }
+          if (p.tab) state.libTab = p.tab;
+        }
+        closeMsgDrawer();
+        return;
+      }
+      if (act.kind === "update") {
+        state.msgTab = "updates";
+        await loadUpdateHistory();
+        return;
+      }
+      if (act.kind === "invoke") {
+        const r = await api((act.payload && act.payload.path) || "", {
+          method: (act.payload && act.payload.method) || "POST",
+        });
+        if (!r.ok) apiError("操作失败", r);
+        else ElMessage.success("已重新发起");
+        await loadMessages();
+        await loadTasks();
+      }
+    }
+
+    async function markAllMsgRead() {
+      const r = await api("/messages/read-all", { method: "POST", body: { companyId: state.curCompanyId || "" } });
+      if (!r.ok) return;
+      state.msgItems.forEach((m) => { m.read = true; });
+      state.msgUnread = 0;
+    }
+
+    /* 跳到任务所在页面 */
+    function gotoTask(t) {
+      if (!t) return;
+      if (t.route === "library") {
+        state.page = "library";
+        if (t.companyId) selectCompany(t.companyId);
+      } else if (t.route === "settings") {
+        state.page = "settings";
+      } else if (t.route === "editor") {
+        state.page = "editor";
+      }
+      closeMsgDrawer();
+    }
+
+    /* 取消任务：先请求取消，服务端确认停下后才标已取消 */
+    async function cancelTask(t) {
+      if (!t) return;
+      const r = await api("/progress/tasks/" + t.id + "/cancel", { method: "POST" });
+      if (!r.ok) {
+        ElMessage.warning((r && r.error) || "该任务无法取消");
+        return;
+      }
+      ElMessage.info("正在停止…");
+      await loadTasks();
+    }
+
+    /* SSE 订阅：任务与消息变化实时推送 */
+    function connectStream() {
+      if (typeof EventSource === "undefined") return;
+      try {
+        msgStream = new EventSource("/api/progress/stream");
+        msgStream.addEventListener("task", (ev) => {
+          try {
+            const t = JSON.parse(ev.data);
+            const i = state.allTasks.findIndex((x) => x.id === t.id);
+            if (i >= 0) state.allTasks.splice(i, 1, t);
+            else state.allTasks.unshift(t);
+            state.activeTaskCount = activeTasks.value.length;
+          } catch { /* 坏数据忽略 */ }
+        });
+        msgStream.addEventListener("message", (ev) => {
+          try {
+            const m = JSON.parse(ev.data);
+            const i = state.msgItems.findIndex((x) => x.id === m.id);
+            if (i >= 0) state.msgItems.splice(i, 1, m);
+            else state.msgItems.unshift(m);
+            if (!m.read) state.msgUnread = (state.msgUnread || 0) + 1;
+          } catch { /* 坏数据忽略 */ }
+        });
+        msgStream.addEventListener("open", () => {
+          /* SSE 连上了：停掉轮询兜底 */
+          if (msgPollTimer) { clearInterval(msgPollTimer); msgPollTimer = null; }
+        });
+        msgStream.addEventListener("error", () => {
+          /* SSE 断了：回落有界轮询，保证状态仍能刷新 */
+          if (!msgPollTimer) msgPollTimer = setInterval(() => { loadMessages(); loadTasks(); }, 5000);
+        });
+      } catch {
+        if (!msgPollTimer) msgPollTimer = setInterval(() => { loadMessages(); loadTasks(); }, 5000);
+      }
+    }
+
+    /* ================================================================
+     * 企业内容库
+     * ================================================================ */
+
+    async function loadCompanies() {
+      const r = await api("/library/companies");
+      if (!r.ok) return;
+      state.libCompanies = r.companies || [];
+      state.libContentTypes = r.contentTypes || [];
+      /* 当前企业：优先用服务端记录的那家 */
+      const cur = await api("/library/current");
+      if (cur && cur.ok) {
+        state.curCompanyId = cur.companyId || "";
+        state.libCompanyId = cur.companyId || (state.libCompanies[0] ? state.libCompanies[0].id : "");
+      }
+    }
+
+    async function selectCompany(id) {
+      state.libCompanyId = id;
+      state.libTab = "articles";
+      await api("/library/current", { method: "POST", body: { companyId: id } });
+      state.curCompanyId = id;
+      await loadLibArticles();
+      await loadLibStyle();
+      await loadLibCitations();
+    }
+
+    async function switchCompany(id) {
+      state.curCompanyId = id || "";
+      await api("/library/current", { method: "POST", body: { companyId: id || "" } });
+      state.refsMeta = null;
+      ElMessage.success(id ? "已切换企业：" + ((state.libCompanies.find((c) => c.id === id) || {}).name || id) : "已改为按通用风格写作");
+      await loadRefs();
+    }
+
+    async function loadLibArticles() {
+      if (!state.libCompanyId) { state.libArticles = []; return; }
+      const q = [];
+      if (state.libKeyword) q.push("q=" + encodeURIComponent(state.libKeyword));
+      if (state.libTypeFilter) q.push("type=" + encodeURIComponent(state.libTypeFilter));
+      const r = await api("/library/companies/" + state.libCompanyId + "/articles" + (q.length ? "?" + q.join("&") : ""));
+      if (!r.ok) return;
+      state.libArticles = r.articles || [];
+      state.libStats = r.stats || null;
+    }
+
+    async function loadLibStyle() {
+      if (!state.libCompanyId) { state.libStyle = null; return; }
+      const r = await api("/library/companies/" + state.libCompanyId + "/style");
+      if (!r.ok) { state.libStyle = null; return; }
+      state.libStyle = r.profile || null;
+    }
+
+    async function loadLibCitations() {
+      if (!state.libCompanyId) { state.libCitations = []; return; }
+      const r = await api("/library/companies/" + state.libCompanyId + "/citations");
+      if (!r.ok) { state.libCitations = []; return; }
+      state.libCitations = r.citations || [];
+    }
+
+    function openCompanyDialog() {
+      state.companyForm = { name: "", description: "" };
+      state.companyDialog = true;
+    }
+    async function saveCompany() {
+      if (!state.companyForm.name.trim()) { ElMessage.warning("请填写企业名称"); return; }
+      state.companyBusy = true;
+      try {
+        const r = await api("/library/companies", { method: "POST", body: state.companyForm });
+        if (!r.ok) { apiError("创建失败", r); return; }
+        state.companyDialog = false;
+        await loadCompanies();
+        await selectCompany(r.company.id);
+        ElMessage.success("已创建企业内容库");
+      } finally { state.companyBusy = false; }
+    }
+
+    function openCollectDialog() {
+      state.collectUrls = "";
+      state.collectUseAI = true;
+      state.collectDialog = true;
+    }
+    async function startCollect() {
+      const urls = state.collectUrls.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      if (!urls.length) { ElMessage.warning("请至少粘贴一个链接"); return; }
+      state.collectBusy = true;
+      try {
+        const r = await api("/library/companies/" + state.libCompanyId + "/articles/collect", {
+          method: "POST", body: { urls, useAI: state.collectUseAI },
+        });
+        if (!r.ok) { apiError("采集未开始", r); return; }
+        state.collectDialog = false;
+        ElMessage.success("已开始采集 " + (urls.length) + " 个链接，可在右上角消息中心看进度");
+        await loadTasks();
+        openMsgDrawer();
+        state.msgTab = "running";
+      } finally { state.collectBusy = false; }
+    }
+
+    async function openArticleDetail(row) {
+      if (!row) return;
+      const r = await api("/library/companies/" + state.libCompanyId + "/articles/" + row.id);
+      if (!r.ok) { apiError("打开失败", r); return; }
+      state.libArticle = r.article;
+      state.libArticleBody = r.article.body || "";
+      state.articleDialog = true;
+    }
+
+    async function saveArticleBody() {
+      if (!state.libArticle) return;
+      state.articleSaving = true;
+      try {
+        const r = await api("/library/companies/" + state.libCompanyId + "/articles/" + state.libArticle.id, {
+          method: "PUT", body: { body: state.libArticleBody },
+        });
+        if (!r.ok) { apiError("保存失败", r); return; }
+        state.articleDialog = false;
+        await loadLibArticles();
+        ElMessage.success(r.changed ? "已保存（创建新版本 v" + r.version + "）" : "内容没有变化");
+      } finally { state.articleSaving = false; }
+    }
+
+    async function recrawlArticle() {
+      if (!state.libArticle) return;
+      const r = await api("/library/companies/" + state.libCompanyId + "/articles/" + state.libArticle.id + "/recrawl", { method: "POST" });
+      if (!r.ok) { ElMessage.warning((r && r.error) || "重新采集失败"); return; }
+      state.articleDialog = false;
+      await loadLibArticles();
+      ElMessage.success("已重新采集");
+    }
+
+    async function reanalyzeArticle() {
+      if (!state.libArticle) return;
+      const r = await api("/library/companies/" + state.libCompanyId + "/articles/" + state.libArticle.id + "/analyze", { method: "POST" });
+      if (!r.ok) { ElMessage.warning((r && r.error) || "重新分析失败"); return; }
+      await loadLibArticles();
+      ElMessage.success("已重新分析");
+    }
+
+    async function toggleExemplar(row) {
+      const r = await api("/library/companies/" + state.libCompanyId + "/articles/" + row.id, {
+        method: "PUT", body: { exemplar: !row.exemplar },
+      });
+      if (!r.ok) { apiError("操作失败", r); return; }
+      row.exemplar = !row.exemplar;
+    }
+
+    async function toggleExclude(row) {
+      const r = await api("/library/companies/" + state.libCompanyId + "/articles/" + row.id, {
+        method: "PUT", body: { excluded: !row.excluded },
+      });
+      if (!r.ok) { apiError("操作失败", r); return; }
+      row.excluded = !row.excluded;
+      /* 排除/恢复后检索缓存必须失效 —— 后续写作不再使用失效内容 */
+      await loadLibStyle();
+    }
+
+    async function delLibArticle(row) {
+      await ElMessageBox.confirm("删除后该文章不再参与检索与风格分析。确定删除？", "删除文章", { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" });
+      const r = await api("/library/companies/" + state.libCompanyId + "/articles/" + row.id, { method: "DELETE" });
+      if (!r.ok) { apiError("删除失败", r); return; }
+      await loadLibArticles();
+      await loadLibStyle();
+      ElMessage.success("已删除");
+    }
+
+    async function analyzeStyle() {
+      if (!state.libCompanyId) return;
+      state.libAnalyzing = true;
+      try {
+        const r = await api("/library/companies/" + state.libCompanyId + "/style/analyze", { method: "POST" });
+        if (!r.ok) { apiError("分析失败", r); return; }
+        await loadLibStyle();
+        await loadCompanies();
+        ElMessage.success("风格档案已更新：" + (r.note || "完成"));
+      } finally { state.libAnalyzing = false; }
+    }
+
+    async function addFact() {
+      const text = state.factInput.trim();
+      if (!text || !state.libStyle) return;
+      const facts = (state.libStyle.facts && state.libStyle.facts.confirmed) || [];
+      const next = facts.concat([{ text, at: new Date().toISOString() }]);
+      const r = await api("/library/companies/" + state.libCompanyId + "/style", {
+        method: "PUT", body: { facts: Object.assign({}, state.libStyle.facts, { confirmed: next }) },
+      });
+      if (!r.ok) { apiError("保存失败", r); return; }
+      state.factInput = "";
+      await loadLibStyle();
+    }
+
+    async function removeFact(i) {
+      if (!state.libStyle) return;
+      const facts = ((state.libStyle.facts && state.libStyle.facts.confirmed) || []).slice();
+      facts.splice(i, 1);
+      const r = await api("/library/companies/" + state.libCompanyId + "/style", {
+        method: "PUT", body: { facts: Object.assign({}, state.libStyle.facts, { confirmed: facts }) },
+      });
+      if (!r.ok) { apiError("保存失败", r); return; }
+      await loadLibStyle();
+    }
+
+    async function runLibSearch() {
+      if (!state.libCompanyId) return;
+      const r = await api("/library/companies/" + state.libCompanyId + "/search?q=" + encodeURIComponent(state.libQuery || ""));
+      if (!r.ok) { apiError("检索失败", r); return; }
+      state.libSearchHits = r.hits || [];
+      if (!state.libSearchHits.length && r.reason) ElMessage.info(r.reason);
+    }
+
+    /* 编辑页「本次参考资料」 */
+    const refsCount = computed(() => {
+      const m = state.refsMeta;
+      if (!m) return 0;
+      return ((m.materials || []).length) + ((m.exemplars || []).length);
+    });
+
+    async function loadRefs() {
+      if (!state.curCompanyId) { state.refsMeta = null; return; }
+      const topic = (state.ceForm && state.ceForm.title) || "";
+      const r = await api("/ai/context?companyId=" + encodeURIComponent(state.curCompanyId) + "&q=" + encodeURIComponent(topic));
+      if (!r.ok) { state.refsMeta = null; return; }
+      state.refsMeta = r.context || null;
+    }
+
+    /* ================================================================
+     * 软件更新
+     * ================================================================ */
+
+    async function loadUpdateState() {
+      const r = await api("/update/state");
+      if (!r.ok) return;
+      state.updateState = Object.assign({}, state.updateState, r);
+      state.updateRepoInput = (r.update && r.update.repo) || state.updateRepoInput || "";
+      state.updateAllowPrerelease = !!r.allowPrerelease;
+    }
+
+    const updateResultText = computed(() => {
+      const s = state.updateState || {};
+      if (s.lastResult === "failed") return "检查失败：" + (s.lastError || "未知原因");
+      if (s.lastResult === "available") return "发现新版本 v" + (s.lastVersion || "");
+      if (s.lastResult === "up_to_date") return "已是最新版本";
+      return "尚未检查";
+    });
+
+    const latestAvailableVersion = computed(() => {
+      const h = state.updateHistory || [];
+      return h.length ? h[0].version : "";
+    });
+
+    async function checkUpdateNow() {
+      state.updateChecking = true;
+      try {
+        const r = await api("/update/check", { method: "POST", body: { manual: true }, timeoutMs: 40000 });
+        await loadUpdateState();
+        if (!r.ok) {
+          /* 检查失败就说失败，绝不显示「已是最新」 */
+          ElMessage.warning((r && r.error) || "检查更新失败");
+          state.updateAvailable = null;
+          return;
+        }
+        if (r.upToDate) {
+          state.updateAvailable = null;
+          ElMessage.success("当前已是最新版本");
+          return;
+        }
+        state.updateAvailable = r;
+        ElMessage.success("发现新版本 v" + r.version);
+        state.msgTab = "updates";
+        await loadUpdateHistory();
+      } finally { state.updateChecking = false; }
+    }
+
+    async function loadUpdateHistory() {
+      const r = await api("/update/history");
+      if (!r.ok) {
+        state.updateHistory = (r && r.items) || [];
+        state.updateHistoryError = (r && r.error) || "获取版本历史失败";
+        return;
+      }
+      state.updateHistory = r.items || [];
+      state.updateHistoryError = "";
+      if (r.installedAt) state.updateState.installedAt = r.installedAt;
+    }
+
+    /* 更新说明渲染：外部 Markdown/HTML 统一净化，链接只允许安全协议 */
+    function renderNotes(md) {
+      const raw = String(md || "");
+      /* 先转义，再把安全的 Markdown 结构还原成 HTML */
+      let out = raw
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/^###\s+(.+)$/gm, "<h5>$1</h5>")
+        .replace(/^##\s+(.+)$/gm, "<h4>$1</h4>")
+        .replace(/^#\s+(.+)$/gm, "<h3>$1</h3>")
+        .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+        .replace(/^[-*]\s+(.+)$/gm, "<li>$1</li>")
+        .replace(/\n{2,}/g, "<br>");
+      /* 去掉 javascript: 之类的不安全链接 */
+      out = out.replace(/href="(?!https?:\/\/)[^"]*"/gi, 'href="#"');
+      return out;
+    }
+
+    async function openExternal(url) {
+      const s = String(url || "");
+      if (!/^https?:\/\//i.test(s)) { ElMessage.warning("只允许打开 http/https 链接"); return; }
+      if (window.notefly && window.notefly.openExternal) {
+        await window.notefly.openExternal(s);
+        return;
+      }
+      window.open(s, "_blank", "noopener");
+    }
+
+    async function saveUpdateRepo() {
+      const r = await api("/config", {
+        method: "POST",
+        body: { update: { repo: state.updateRepoInput, allowPrerelease: state.updateAllowPrerelease } },
+      });
+      if (!r.ok) { apiError("保存失败", r); return; }
+      await loadUpdateState();
+      ElMessage.success("已保存更新设置");
+    }
+
+    /* 「立即更新」：明确说明将下载、安装并重新打开 */
+    async function startUpdate(release) {
+      if (!release) return;
+      await ElMessageBox.confirm(
+        "将下载新版本安装包，完成后会自动安装并重新打开 NoteFly。下载期间请不要强制结束程序。",
+        "立即更新 v" + release.version,
+        { type: "info", confirmButtonText: "下载并安装", cancelButtonText: "稍后" }
+      ).catch(() => { return; });
+      /* 桌面版：走主进程下载 + 安装 */
+      if (window.notefly && window.notefly.isElectron) {
+        const dl = await api("/update/download", { method: "POST" });
+        if (!dl.ok) { ElMessage.warning((dl && dl.error) || "无法开始下载"); return; }
+        ElMessage.info("正在下载更新包，可在消息中心看进度");
+        await loadTasks();
+        openMsgDrawer();
+        state.msgTab = "running";
+        return;
+      }
+      /* 浏览器 / 开发模式：不执行安装覆盖，打开正式发布页 */
+      if (release.url) {
+        await openExternal(release.url);
+        ElMessage.info("当前不是桌面版，已打开发布页，请手动下载安装");
+      } else {
+        ElMessage.info("当前不是桌面版，无法自动安装");
+      }
+    }
+
+    async function skipUpdate(version) {
+      if (!version) return;
+      const r = await api("/update/skip", { method: "POST", body: { version } });
+      if (!r.ok) { apiError("操作失败", r); return; }
+      state.updateAvailable = null;
+      ElMessage.success("已跳过 v" + version + "，后续新版本仍会提醒");
+    }
+
+    /* ================================================================
+     * 桌面版：关闭主窗口时的行为 + 退出前保存
+     * ================================================================ */
+    async function loadCloseBehavior() {
+      if (!window.notefly || !window.notefly.getCloseBehavior) return;
+      const r = await window.notefly.getCloseBehavior();
+      if (r && r.ok) state.closeBehavior = r.behavior || "hide";
+    }
+    async function saveCloseBehavior(v) {
+      if (!window.notefly || !window.notefly.setCloseBehavior) return;
+      const r = await window.notefly.setCloseBehavior(v);
+      if (r && r.ok) {
+        state.closeBehavior = r.behavior;
+        ElMessage.success(v === "quit" ? "关闭主窗口将退出软件" : "关闭主窗口将隐藏到托盘");
+      }
     }
 
     function calShift(n) {
@@ -3203,6 +4345,12 @@ const app = createApp({
     onMounted(async () => {
       toggleTheme(state.themeDark); // 应用持久化主题
       await checkEngine(true); await loadAll();
+      /* 消息中心 / 企业内容库 / 更新状态 */
+      await loadCompanies();
+      await loadMessages(); await loadTasks();
+      connectStream();
+      await loadUpdateState();
+      await loadCloseBehavior();
       /* 初始化就启动同步：已有活跃任务或未来定时任务时必须立刻进入轮询/到点唤醒，
          否则后台已经开始执行，前台仍停在“定时待发” */
       if (hasActiveTask() || nextScheduledAt()) pollTasksOnce();
@@ -3318,7 +4466,55 @@ const app = createApp({
       if (typeof window !== "undefined") window.removeEventListener("resize", onWinResize);
       /* 自动刷新定时器不能留在后台空转 */
       stopLogAuto();
+      /* 断开 SSE：页面卸载后不留着连接 */
+      if (msgStream) { try { msgStream.close(); } catch {} msgStream = null; }
+      if (msgPollTimer) { clearInterval(msgPollTimer); msgPollTimer = null; }
     });
+
+    /* ---------- 桌面版事件 ---------- */
+    if (window.notefly && window.notefly.on) {
+      /* 托盘「新建内容」 */
+      window.notefly.on("notefly:new-content", () => {
+        openContentEditor();
+      });
+      /* 托盘「检查更新」的结果 */
+      window.notefly.on("notefly:update-checked", (r) => {
+        if (!r) return;
+        if (r.ok && r.version) {
+          state.updateAvailable = r;
+          ElMessage.success("发现新版本 v" + r.version);
+        } else if (!r.ok && r.error) {
+          ElMessage.warning("检查更新失败：" + r.error);
+        }
+        loadUpdateState();
+      });
+      /* 托盘创建失败：主窗口保持可见，提示原因 */
+      window.notefly.on("notefly:tray-error", (p) => {
+        ElNotification({
+          title: "系统托盘不可用",
+          message: (p && p.error) + "。为避免失去入口，主窗口将保持显示。",
+          type: "warning",
+          duration: 0,
+        });
+      });
+      /* 退出前：保存未保存的稿件，回复主进程 */
+      window.notefly.on("notefly:before-quit", async (p) => {
+        let saved = true;
+        try {
+          if (state.ceDirty && state.ceForm && (state.ceForm.body || state.ceForm.title)) {
+            /* 有未保存内容 → 先存草稿 */
+            const r = await api("/contents", { method: "POST", body: Object.assign({}, state.ceForm, { draft: true }) });
+            saved = !!r.ok;
+            if (!saved) {
+              await ElMessageBox.alert("稿件保存失败：" + (r.error || "未知原因") + "\n请处理后再退出。", "无法保存", { type: "error" });
+            }
+          }
+        } catch (e) {
+          saved = false;
+        }
+        window.notefly.replyQuit(saved);
+      });
+    }
 
     return { ...toRefs(state), typeLabels, typeLabel, statusName, tName, statusTagType, targetTagType, taskStatus, fmt, pageTitle, pageDesc, pageSection, engineText, statCards, statusDist, platformRank, pubStep, pubContent, readyTargets,
       sideW, isRail,
@@ -3338,7 +4534,24 @@ const app = createApp({
       doPublish, openContentEditor, saveContent, saveDraft, delContent, closeEditor, onMenuSelect, rpaLogin, rpaCheck, refreshAccount, openAccountMeta, saveAccountMeta,
       onNewContentMode, confirmGzhTemplate, gzhThemeName, gzhThemeScene, refreshGzhPreview, onGzhThemeChange, copyGzhHtml, exportGzhHtml, loadGzhTemplates, saveAuthor, gzhAuthor,
       openTargetPlatform, verifyTarget, confirmTarget,
-      viewTask, submitTarget, retryTarget, submitAll, switchDataDir, resetDataDir };
+      viewTask, submitTarget, retryTarget, submitAll, switchDataDir, resetDataDir,
+      /* 消息中心 / 全局进度 */
+      openMsgDrawer, closeMsgDrawer, loadMessages, loadTasks, activeTasks, finishedTasks,
+      taskPercent, taskElapsed, taskKindLabel, taskStatusLabel, msgKindLabel,
+      collectStatusLabel, collectTagType, contentTypeName, fmtMsgTime, fmtSize,
+      openMsg, markAllMsgRead, gotoTask, cancelTask,
+      /* 企业内容库 */
+      loadCompanies, selectCompany, switchCompany, loadLibArticles, loadLibStyle, loadLibCitations,
+      openCompanyDialog, saveCompany, openCollectDialog, startCollect,
+      openArticleDetail, saveArticleBody, recrawlArticle, reanalyzeArticle,
+      toggleExemplar, toggleExclude, delLibArticle, analyzeStyle, addFact, removeFact, runLibSearch,
+      refsCount, loadRefs,
+      /* 软件更新 */
+      loadUpdateState, updateResultText, latestAvailableVersion, checkUpdateNow, loadUpdateHistory,
+      renderNotes, openExternal, saveUpdateRepo, startUpdate, skipUpdate,
+      /* 桌面版生命周期 */
+      loadCloseBehavior, saveCloseBehavior,
+    };
   },
 });
 app.component("task-table", TaskTable);

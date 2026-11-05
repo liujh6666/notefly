@@ -88,7 +88,7 @@ async function clearOverlays(page) {
   await sleep(700);
 
   /* --- 进入编辑器 --- */
-  await page.locator(".sidebar .el-menu-item", { hasText: "内容库" }).click();
+  await page.locator(".sidebar .el-menu-item").filter({ hasText: /^内容库$/ }).click();
   await sleep(500);
   await page.getByRole("button", { name: /新建内容/ }).click();
   await sleep(700);
@@ -208,7 +208,7 @@ async function clearOverlays(page) {
     body: JSON.stringify({ baseUrl: `http://127.0.0.1:${fakePort}/v1`, apiKey: "k", model: "fake-model" }),
   });
 
-  await page.locator(".sidebar .el-menu-item", { hasText: "内容库" }).click();
+  await page.locator(".sidebar .el-menu-item").filter({ hasText: /^内容库$/ }).click();
   await sleep(500);
   await confirmLeave(page);
   await sleep(400);

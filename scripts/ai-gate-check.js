@@ -69,7 +69,7 @@ async function waitReady(retries = 40) {
   check("AI 状态灯可点", (await page.locator(".engine-chip--click").count()) >= 1);
 
   /* 2. 编辑器里的「AI 写作」按钮：灰态但不是 disabled（要能吃点击） */
-  await page.locator(".sidebar .el-menu-item", { hasText: "内容库" }).click();
+  await page.locator(".sidebar .el-menu-item").filter({ hasText: /^内容库$/ }).click();
   await sleep(400);
   await page.getByRole("button", { name: /新建内容/ }).click();
   await sleep(500);
@@ -103,7 +103,7 @@ async function waitReady(retries = 40) {
   check("AI 卡片滚动到了可视区", inView);
 
   /* 5. 去 AI 味弹窗里的「AI 深度改写」：灰但可点 */
-  await page.locator(".sidebar .el-menu-item", { hasText: "内容库" }).click();
+  await page.locator(".sidebar .el-menu-item").filter({ hasText: /^内容库$/ }).click();
   await sleep(400);
   await page.getByRole("button", { name: /新建内容/ }).click();
   await sleep(500);

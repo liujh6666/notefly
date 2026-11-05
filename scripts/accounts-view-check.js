@@ -43,7 +43,7 @@ function check(name, cond, extra = "") {
   await page.screenshot({ path: path.join(ROOT, "_export", "accounts-fixed.png") });
 
   /* 内容库数据在迁移后的目录里仍可访问（草稿 + 封面） */
-  await page.locator(".sidebar .el-menu-item", { hasText: "内容库" }).first().click();
+  await page.locator(".sidebar .el-menu-item").filter({ hasText: /^内容库$/ }).first().click();
   await sleep(900);
   const cBody = await page.locator(".el-main").innerText();
   check("内容库能看到迁移过来的草稿", /测试/.test(cBody), cBody.slice(0, 200));
