@@ -786,7 +786,7 @@ app.post("/api/rpa/checklogin", async (req, res) => {
     if (r.ok) {
       const details = config.kaState.details || [];
       const e = details.find((x) => x.id === req.body.platform);
-      const patch = { online: !!r.loggedIn, checkedAt: r.checkedAt || new Date().toISOString(), method: r.method || "", error: "" };
+      const patch = { online: !!r.loggedIn, checkedAt: r.checkedAt || new Date().toISOString(), method: r.method || "", error: "", judge: LOGIN_JUDGE_VERSION };
       if (e) Object.assign(e, patch);
       else details.push({ platform: req.body.platform, id: req.body.platform, ...patch });
       config.kaState.details = details;

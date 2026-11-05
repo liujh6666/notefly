@@ -300,19 +300,49 @@ async function apiLoginState(page, spec) {
   return { known: false };
 }
 
-/* 统一的登录态校验：先接口，再 DOM 兜底 */
+/* 统一的登录态校验：先接口，再 DOM，最后登录 cookie 兜底 */
 async function verifyLogin(page, adapter) {
   const api = await apiLoginState(page, adapter.loginProbe);
   if (api.known) return { loggedIn: !!api.loggedIn, method: "api", detail: api.detail || "" };
   if (typeof adapter.isLoggedIn === "function") {
     try {
-      const loggedIn = !!(await adapter.isLoggedIn(page));
-      return { loggedIn, method: "dom", detail: "" };
+      const r = await adapter.isLoggedIn(page);
+      const obj = (r && typeof r === "object") ? r : { loggedIn: !!r, detail: "" };
+      if (obj.loggedIn) return { loggedIn: true, method: "dom", detail: obj.detail || "" };
+      /* DOM 说没登录 —— 若适配器声明了「登录 cookie」，用会话里的 cookie 复核一次。
+         某些平台（CSDN）页面证据会被推荐卡/其它产品入口干扰，cookie 更硬。 */
+      const ck = adapter.loginProbe && adapter.loginProbe.cookieCheck;
+      if (ck && ck.domain && Array.isArray(ck.any) && ck.any.length) {
+        const hit = await hasLoginCookie(ck);
+        if (hit) return { loggedIn: true, method: "cookie", detail: "检测到登录 cookie：" + hit };
+        return { loggedIn: false, method: "dom", detail: obj.detail || "" };
+      }
+      return { loggedIn: false, method: "dom", detail: obj.detail || "" };
     } catch (e) {
       return { loggedIn: false, method: "dom", detail: String(e.message || e).slice(0, 160) };
     }
   }
   return { loggedIn: false, method: "none", detail: "该平台暂未配置登录探测" };
+}
+
+/* 会话里是否带着「只有登录才会种下」的 cookie。
+   桌面版读内置浏览器分区（与用户登录是同一份）；纯 Playwright 上下文读 context。 */
+async function hasLoginCookie(ck) {
+  try {
+    let names = [];
+    if (ELECTRON) {
+      const list = await ELECTRON.session.fromPartition(PARTITION).cookies.get({ domain: ck.domain });
+      names = list.map((c) => c.name);
+    } else if (typeof ctxPromise !== "undefined" && ctxPromise) {
+      const ctx = await ctxPromise;
+      const list = await ctx.cookies();
+      names = list.filter((c) => (c.domain || "").replace(/^\./, "").endsWith(ck.domain)).map((c) => c.name);
+    }
+    const hit = ck.any.filter((n) => names.includes(n));
+    return hit.length ? hit.join(",") : "";
+  } catch {
+    return "";
+  }
 }
 
 /* 发布前验真（social-auto-upload 的「上传前先验，别拿过期凭证硬发」）
@@ -443,7 +473,16 @@ const ADAPTERS = {
     async isLoggedIn(page) {
       await page.goto("https://weibo.com/", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
       await sleep(2500);
-      return page.evaluate(() => !!document.querySelector('[class*="LoginPop"], a[href*="signin"]') === false && !!document.querySelector('nav, .Main_nav_version'));
+      return page.evaluate(() => {
+        // 被踢到 newlogin = 会话未建立/已过期（哪怕 cookie 还在，微博也不认了）
+        if (/newlogin|\/signin|passport\.weibo/i.test(location.href)) {
+          return { loggedIn: false, detail: "微博把会话重定向到了登录页（newlogin），请重新登录一次" };
+        }
+        const loginPop = document.querySelector('[class*="LoginPop"], a[href*="signin"]');
+        const nav = document.querySelector('nav, .Main_nav_version');
+        if (!loginPop && nav) return { loggedIn: true, detail: "导航栏正常且无登录弹窗" };
+        return { loggedIn: false, detail: "页面上出现了登录弹窗" };
+      });
     },
     async fill(page, snap) {
       const box = await waitSel(page, '.Form_input, [contenteditable="true"][aria-label], .omp-body .DraftEditor-root div[contenteditable="true"]', 20000);
@@ -480,63 +519,114 @@ function genericArticleAdapter(cfg) {
     composeUrl: cfg.composeUrl,
     homeUrl: cfg.homeUrl || "",
     loginUrl: cfg.loginUrl || "",
+    checkUrl: cfg.checkUrl || "",
+    loginProbe: cfg.loginProbe,
     status: "unverified",
     capabilities: { draft: "unverified", autoSubmit: "unverified", verify: "unverified" },
     async isLoggedIn(page) {
-      await page.goto(cfg.homeUrl || cfg.composeUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
-      await sleep(2500);
-      return page.evaluate(() => {
+      const checkUrl = cfg.checkUrl || cfg.homeUrl || cfg.composeUrl;
+      await page.goto(checkUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+      await sleep(3000);
+      return page.evaluate(({ consoleCheck }) => {
         const url = location.href;
-        // 跳到登录页 = 未登录
-        if (/login|signin|passport/i.test(url)) return false;
-
         const txtOf = (el) => ((el && (el.innerText || el.textContent)) || "").trim();
         const clsOf = (el) => {
           const c = el && el.className;
           if (!c) return "";
           return typeof c === "string" ? c : (c.baseVal || c.toString ? c.toString() : "");
         };
+        const vis = (el) => !!(el.offsetWidth || el.offsetHeight || (el.getClientRects && el.getClientRects().length));
 
-        /* 1) 存在登录/注册入口 = 未登录
-              判据放宽到「class/href 含 login 关键词」或「可见文字就是登录/注册」——
-              旧实现要求元素文字必须匹配「登录」，遇到纯图标登录按钮就漏判，
-              接着被下面的头像规则兜成「已登录」，这是误判的主要来源。 */
+        // 被踢到登录页 = 未登录（最可靠的信号，创作者后台未登录时都会重定向）
+        if (/login|signin|passport|userAuth/i.test(url)) {
+          return { loggedIn: false, detail: "被重定向到登录页（" + url.slice(0, 70) + "）" };
+        }
+
+        /* ---- 硬证据优先于登录入口 ----
+           CSDN 实测：已登录页同时存在「可见的登录按钮」（toolbar-btn-login，
+           属于其它产品的入口）和「隐藏的退出入口 + 个人头像」。
+           若先看登录入口必误判。所以先找登录证据，找不到才看登录入口。 */
+        // 先探一遍「可见的登录/注册入口」（后面多处要用）
+        let visibleLogin = "";
         const entrySel = 'a,button,[role="button"],span[class*="login"],div[class*="login"],a[href*="signin"],a[href*="register"]';
         for (const el of document.querySelectorAll(entrySel)) {
+          if (!vis(el)) continue;
           const sig = (clsOf(el) + " " + (el.getAttribute("href") || "") + " " + (el.getAttribute("id") || ""));
-          if (/\b(login|signin|sign-in|passport|register)\b/i.test(sig)) return false;
+          if (/\b(login|signin|sign-in|passport|register)\b/i.test(sig)) { visibleLogin = clsOf(el).slice(0, 40) || sig.slice(0, 40); break; }
           const t = txtOf(el);
-          if (/^(登录|注册|登陆|立即登录|免费注册|登录\/注册|新用户注册|sign in|log in|sign up)$/i.test(t)) return false;
+          if (/^(登录|注册|登陆|立即登录|免费注册|登录\/注册|新用户注册|sign in|log in|sign up)$/i.test(t)) { visibleLogin = t; break; }
+        }
+        // a) 退出/登出入口：可见的按文字算；隐藏的必须带 logout 类关键词
+        //    且「有个人头像链接」或「页面上没有可见登录入口」佐证。
+        let hiddenLogout = null;
+        let hasPersonalLink = false;
+        for (const el of document.querySelectorAll("a,button,span,div,li")) {
+          const t = txtOf(el);
+          if (/^(退出登录|退出|登出|退出账号|logout|sign out|log out)$/i.test(t)) {
+            if (vis(el)) return { loggedIn: true, detail: "找到可见的退出入口" };
+            const sig = (typeof el.className === "string" ? el.className : "") + " " + (el.id || "");
+            if (/log(out|in)?|sign ?out/i.test(sig) && !hiddenLogout) hiddenLogout = sig.trim().slice(0, 40);
+          }
+        }
+        for (const el of document.querySelectorAll('[class*="avatar"],img[class*="avatar"],a[class*="avatar"]')) {
+          const link = el.closest && el.closest("a[href]");
+          const href = link ? (link.getAttribute("href") || "") : "";
+          if (href && !/login|signin|passport/i.test(href)) { hasPersonalLink = true; break; }
+        }
+        if (hiddenLogout && (hasPersonalLink || !visibleLogin)) {
+          return { loggedIn: true, detail: "找到退出入口（" + hiddenLogout + "）" + (hasPersonalLink ? "与个人头像链接" : "，且页面无登录入口") };
         }
 
-        /* 2) 找确凿的登录证据（按可信度从强到弱），没有就判未登录。
-              宁可报「未登录」也不要误报「已登录」：误报会让用户以为能发布，
-              真正发布时又被 preflight 拦下，体验更差。 */
-        // a) 退出/登出入口 —— 最硬的证据
-        for (const el of document.querySelectorAll("a,button,span,div,li")) {
-          if (/^(退出登录|退出|登出|退出账号|logout|sign out|log out)$/i.test(txtOf(el))) return true;
-        }
-        // b) 用户昵称 —— 有实际文字的用户名元素
+        // b) 可见用户昵称 —— 有实际文字且可见。
+        //    推荐流/作者卡片也会用 nickname 类（简书首页一屏三张卡）：
+        //    同一个类名出现多个不同文字 = 列表而非「我」，跳过。
+        const seen = {};
         for (const el of document.querySelectorAll(
           '[class*="nickname"],[class*="user-name"],[class*="userName"],[class*="username"],[class*="header-user"],[class*="account-name"]'
         )) {
           const t = txtOf(el);
-          if (t && t.length <= 24 && !/^(登录|注册|游客|未登录|立即登录)$/.test(t)) return true;
+          if (!t || t.length > 24 || /^(登录|注册|游客|未登录|立即登录)$/.test(t) || !vis(el)) continue;
+          const k = clsOf(el);
+          (seen[k] = seen[k] || new Set()).add(t);
         }
-        // c) 头像/用户块 —— 必须是「指向个人主页的链接」或「带文字」，排除游客占位头像
+        for (const [k, set] of Object.entries(seen)) {
+          if (set.size === 1) {
+            const t = [...set][0];
+            return { loggedIn: true, detail: "找到用户昵称「" + t.slice(0, 16) + "」" };
+          }
+        }
+        // c) 头像指向个人主页（可见）—— 必须是个人页链接，不能只按文字兜
+        //    （CSDN 首页的推荐卡片带文字但指向别人的博客，按文字兜会误判）
         for (const el of document.querySelectorAll(
           '[class*="avatar"],[class*="user-info"],[class*="userInfo"],[class*="header-user"],img[class*="avatar"]'
         )) {
+          if (!vis(el)) continue;
           const link = el.closest && el.closest("a[href]");
           if (link) {
             const href = link.getAttribute("href") || "";
-            if (/\/(user|my|member|profile|author|space|account|creator)(\/|$|\?)/i.test(href) && !/login|signin/i.test(href)) return true;
+            if (/\/(user|my|member|profile|author|space|account|creator)(\/|$|\?)/i.test(href) && !/login|signin/i.test(href)) {
+              return { loggedIn: true, detail: "头像指向个人主页（" + href.slice(0, 50) + "）" };
+            }
           }
-          const t = txtOf(el);
-          if (t && !/^(登录|注册|游客|未登录)$/.test(t)) return true;
         }
-        return false;
-      });
+
+        /* ---- consoleCheck（创作者后台直检）----
+           百家号这类后台：未登录必然重定向到 passport，登录后停在原页。
+           「没被跳登录页 + 没有可见登录入口 + 页面有实质内容」= 已登录。 */
+        if (consoleCheck) {
+          if (!visibleLogin && document.body && document.body.innerText.trim().length > 100) {
+            return { loggedIn: true, detail: "创作者后台正常打开，且未出现登录入口" };
+          }
+          if (visibleLogin) return { loggedIn: false, detail: "页面上有可见的「" + visibleLogin + "」入口" };
+        }
+
+        /* ---- 到这里都没有证据，按登录入口判未登录（可见才算）----
+           隐藏的登录模板/其它产品的登录链接不能作为未登录依据。 */
+        if (visibleLogin) {
+          return { loggedIn: false, detail: "页面上有可见的登录入口（" + visibleLogin + "）" };
+        }
+        return { loggedIn: false, detail: "页面上找不到登录证据（昵称/头像/退出入口都没有）" };
+      }, { consoleCheck: !!cfg.consoleCheck });
     },
     async fill(page, snap) {
       // 中转入口：composeUrl 落在列表/首页路由时（编辑器元素不存在），先点一步进去
@@ -627,6 +717,9 @@ const ADAPTERS_EXTRA = {
     homeUrl: "https://www.csdn.net/",
     /* 首页有 WAF，内置浏览器打开偶发 403；登录一律走官方登录页 */
     loginUrl: "https://passport.csdn.net/login",
+    /* DOM 判定的兜底：csdn.net 的 UserToken/UserNick 只在登录后种下
+       （2026-11-05 实机 cookie 审计确认），页面证据模糊时用会话 cookie 复核 */
+    loginProbe: { cookieCheck: { domain: "csdn.net", any: ["UserToken", "UserNick"] } },
     titleSel: 'input[placeholder*="标题"], .article-bar input',
     bodySel: [".CodeMirror", "div[contenteditable='true']", "textarea"],
   }),
@@ -643,6 +736,10 @@ const ADAPTERS_EXTRA = {
     label: "百家号",
     composeUrl: "https://baijiahao.baidu.com/builder/rc/edit?type=news",
     homeUrl: "https://baijiahao.baidu.com/",
+    /* 首页是内容 feed（无任何登录证据）。登录检测走作者后台：
+       未登录必被重定向到 passport.baidu.com，登录后停在原页（2026-11-05 实机验证） */
+    checkUrl: "https://baijiahao.baidu.com/builder/rc/home",
+    consoleCheck: true,
     titleSel: 'input[placeholder*="标题"]',
     bodySel: [".ProseMirror", ".w-e-text[contenteditable]", "div[contenteditable='true']"],
     titleMax: 64,
@@ -705,6 +802,10 @@ const ADAPTERS_EXTRA = {
     label: "简书",
     composeUrl: "https://www.jianshu.com/writer",
     homeUrl: "https://www.jianshu.com/",
+    /* 首页推荐流里全是其他作者的 nickname 卡片，不能作为检测点；
+       /writer 未登录必被重定向到登录页，登录后停在原页 */
+    checkUrl: "https://www.jianshu.com/writer",
+    consoleCheck: true,
     titleSel: 'input[placeholder*="标题"], textarea[placeholder*="标题"]',
     bodySel: [".ProseMirror", "div[contenteditable='true']", "textarea"],
   }),

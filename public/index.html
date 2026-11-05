@@ -4073,7 +4073,7 @@ const app = createApp({
             state.bUrl = "https://juejin.cn/";
             loadAll();
           } else if (ck.ok) {
-            ElMessage.warning("没有检测到登录状态 —— 请确认页面上已经是登录后的样子（不是登录/扫码框），再点一次「完成登录」");
+            ElMessage.warning("没有检测到登录状态" + (ck.detail ? "（" + ck.detail + "）" : "") + " —— 请确认页面上已经是登录后的样子（不是登录/扫码框），再点一次「完成登录」");
           } else {
             ElMessage.warning("检查未完成：" + (ck.error || ""));
           }
