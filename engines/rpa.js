@@ -611,6 +611,15 @@ const ADAPTERS = {
  *   正文：ProseMirror / wangEditor / CodeMirror / contenteditable 之一
  * 填充策略按候选选择器逐个尝试，全部失败才报错。
  */
+/* 不支持 Markdown 的富文本：去标记写纯文本（幂等，只处理最常见的行内/块级标记） */
+function plainTextOf(md) {
+  return md
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/\*(.*?)\*/g, "$1")
+    .replace(/`{1,3}([^`]*)`{1,3}/g, "$1")
+    .replace(/^\s*[-*]\s+/gm, "• ");
+}
 function genericArticleAdapter(cfg) {
   return {
     label: cfg.label,
@@ -728,6 +737,12 @@ function genericArticleAdapter(cfg) {
       }, { consoleCheck: !!cfg.consoleCheck });
     },
     async fill(page, snap) {
+      // 后台入口已下线/改版时页面标题通常带 404（如搜狐号 2026-11 改版），
+      // 提前给出明确错误，不落到模糊的「编辑器未找到」
+      const pageTitle = await page.title().catch(() => "");
+      if (/404|页面不存在|页面找不到/.test(pageTitle)) {
+        throw new Error(`[${cfg.label}] 后台入口页面已失效（${pageTitle.slice(0, 30)}），平台可能已改版或下线该路径，请在账号页人工检查`);
+      }
       // 中转入口：composeUrl 落在列表/首页路由时（编辑器元素不存在），先点一步进去
       if (cfg.entrySel) {
         const bodySels0 = cfg.bodySel || ["div[contenteditable='true']"];
@@ -745,8 +760,16 @@ function genericArticleAdapter(cfg) {
       // 标题
       const titleSel = cfg.titleSel || 'input[placeholder*="标题"], textarea[placeholder*="标题"]';
       const title = await waitSel(page, titleSel, 20000).catch(() => null);
-      if (title) await title.fill((snap.title || "").slice(0, cfg.titleMax || 100));
-      else console.warn(`[${cfg.label}] 未找到标题输入框，尝试直接填正文`);
+      if (title) {
+        if (await title.isVisible().catch(() => false)) {
+          await title.fill((snap.title || "").slice(0, cfg.titleMax || 100))
+            .catch((e) => console.warn(`[${cfg.label}] 标题填充失败，继续填正文：${String(e.message || e).slice(0, 120)}`));
+        } else {
+          console.warn(`[${cfg.label}] 标题输入框不可见，跳过标题填充`);
+        }
+      } else {
+        console.warn(`[${cfg.label}] 未找到标题输入框，尝试直接填正文`);
+      }
 
       // 正文：按模式写入
       const body = snap.body || "";
@@ -762,6 +785,8 @@ function genericArticleAdapter(cfg) {
       for (const sel of bodySels) {
         const el = await page.$(sel).catch(() => null);
         if (!el) continue;
+        // 不可见的编辑器元素（如 CSDN 页面上隐藏的反馈 textarea）绝不能拿来填正文
+        if (!(await el.isVisible().catch(() => false))) continue;
         try {
           if (sel.includes("CodeMirror")) {
             const ok = await page.evaluate((md) => {
@@ -774,16 +799,15 @@ function genericArticleAdapter(cfg) {
             await el.fill(body);
             done = true; break;
           } else {
-            await el.click();
+            // focus 优先于 click：focus 是 DOM 行为，不会被浮层/hit-target 检查拦截
+            // （百家号 FeEditor 的 click 会被命中检测卡到超时）
+            const focused = await el.evaluate((n) => {
+              n.focus();
+              return document.activeElement === n || n.contains(document.activeElement);
+            }).catch(() => false);
+            if (!focused) await el.click({ force: true }).catch(() => {});
             if (cfg.plainText) {
-              // 不支持 Markdown 的富文本：去标记写纯文本
-              const text = body
-                .replace(/^#{1,6}\s*/gm, "")
-                .replace(/\*\*(.*?)\*\*/g, "$1")
-                .replace(/\*(.*?)\*/g, "$1")
-                .replace(/`{1,3}([^`]*)`{1,3}/g, "$1")
-                .replace(/^\s*[-*]\s+/gm, "• ");
-              await page.keyboard.insertText(text);
+              await page.keyboard.insertText(plainTextOf(body));
             } else {
               await page.keyboard.insertText(body);
             }
@@ -791,6 +815,22 @@ function genericArticleAdapter(cfg) {
           }
         } catch (e) {
           lastErr = String(e.message || e);
+        }
+      }
+      // iframe 兜底：UEditor 系（大鱼号等）把编辑区放在 iframe 的 body 里，
+      // 主文档选择器永远找不到
+      if (!done) {
+        for (const frame of page.frames()) {
+          if (frame === page.mainFrame()) continue;
+          const el = await frame.$("body[contenteditable='true'], body[contenteditable='']").catch(() => null);
+          if (!el || !(await el.isVisible().catch(() => false))) continue;
+          try {
+            await el.focus().catch(() => {});
+            await page.keyboard.insertText(cfg.plainText ? plainTextOf(body) : body);
+            done = true; break;
+          } catch (e) {
+            lastErr = String(e.message || e);
+          }
         }
       }
       if (!done) throw new Error(`[${cfg.label}] 正文填充失败（编辑器未找到或改版）${lastErr ? "：" + lastErr : ""}`);
@@ -820,7 +860,10 @@ const ADAPTERS_EXTRA = {
        （2026-11-05 实机 cookie 审计确认），页面证据模糊时用会话 cookie 复核 */
     loginProbe: { cookieCheck: { domain: "csdn.net", any: ["UserToken", "UserNick"] } },
     titleSel: 'input[placeholder*="标题"], .article-bar input',
-    bodySel: [".CodeMirror", "div[contenteditable='true']", "textarea"],
+    /* 2026-11 实机探针：CSDN 编辑器已改为 StackEdit 风格 contenteditable pre，
+       旧 .CodeMirror（CM5 API）失效；页面上还有隐藏的反馈 textarea，
+       因此候选列表必须先验可见性（fill 循环已内置 isVisible 过滤） */
+    bodySel: ["pre.editor__inner", ".CodeMirror", "div[contenteditable='true']", "textarea"],
   }),
   toutiao: genericArticleAdapter({
     label: "头条号",
@@ -840,12 +883,17 @@ const ADAPTERS_EXTRA = {
     checkUrl: "https://baijiahao.baidu.com/builder/rc/home",
     consoleCheck: true,
     titleSel: 'input[placeholder*="标题"]',
-    bodySel: [".ProseMirror", ".w-e-text[contenteditable]", "div[contenteditable='true']"],
+    /* 2026-11 实机探针：百家号已换 FeEditor 新编辑器（contenteditable div）；
+       其 click 会被浮层命中检测卡到超时，fill 循环改用 focus() 绕过 */
+    bodySel: ['div[class*="FeEditor"][contenteditable="true"]', ".ProseMirror", ".w-e-text[contenteditable]", "div[contenteditable='true']"],
     titleMax: 64,
     plainText: false,
   }),
   sohu: genericArticleAdapter({
     label: "搜狐号",
+    /* 2026-11-05 实机探针：旧入口 /mpbp/bp/base-info 已 404 下线，
+       搜狐号登录页整体改版（登录后从首页「创作中心」进后台）。
+       新发布路径待登录确认后更新；fill 的 404 检测会给出明确报错 */
     composeUrl: "https://mp.sohu.com/mpbp/bp/base-info",
     homeUrl: "https://mp.sohu.com/",
     titleSel: 'input[placeholder*="标题"]',
