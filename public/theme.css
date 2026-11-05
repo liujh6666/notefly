@@ -403,6 +403,10 @@ body::before {
   border-bottom: 1px solid var(--nf-line);
 }
 .logo-img { width: 32px; height: 32px; display: block; border-radius: var(--nf-radius-sm); }
+/* 双 logo：浅色用蓝橙渐变桌面图标，暗色用原单色 logo */
+.logo-img--light { display: none; }
+html:not(.dark) .logo-img--light { display: block; }
+html:not(.dark) .logo-img--dark { display: none; }
 .logo-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .logo-name {
   font-family: var(--nf-font-display);
@@ -912,11 +916,19 @@ body::before {
 .content-title-cell { font-family: var(--nf-font-display); font-size: 15px; font-weight: 600; color: var(--nf-ink); }
 .content-title-cell .el-tag { flex: none; max-width: none; vertical-align: 2px; margin-left: 6px; }
 
-/* 状态灯呼吸感：绿色时轻微发光，远看也能分清状态 */
-.lamp.ok { animation: lamp-glow 2.4s ease-in-out infinite; }
+/* 状态灯呼吸感：绿色时灯体脉动 + 光晕张合，远看也能分清状态 */
+.lamp.ok { animation: lamp-glow 1.6s ease-in-out infinite; }
 @keyframes lamp-glow {
-  0%, 100% { box-shadow: 0 0 0 3px var(--nf-ok-soft); }
-  50% { box-shadow: 0 0 0 3px var(--nf-ok-soft), 0 0 6px 1px var(--nf-ok); }
+  0%, 100% {
+    box-shadow: 0 0 0 3px var(--nf-ok-soft), 0 0 2px 0 var(--nf-ok);
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  50% {
+    box-shadow: 0 0 0 3px var(--nf-ok-soft), 0 0 12px 3px var(--nf-ok);
+    transform: scale(1.25);
+    opacity: 1;
+  }
 }
 @media (prefers-reduced-motion: reduce) { .lamp.ok { animation: none; } }
 

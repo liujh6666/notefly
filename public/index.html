@@ -23,7 +23,8 @@
   <el-container class="layout">
     <el-aside :width="sideW" class="sidebar" :class="{ rail: isRail }">
       <div class="logo">
-        <img src="logo.png" class="logo-img" alt="NoteFly" />
+        <img src="logo.png" class="logo-img logo-img--dark" alt="NoteFly" />
+        <img src="logo-light.png" class="logo-img logo-img--light" alt="NoteFly" />
         <div class="logo-text">
           <div class="logo-name">NoteFly</div>
         </div>
@@ -55,7 +56,7 @@
           <span class="lamp" :class="{ ok: engineOk }"></span>
           <span>NoteFly RPA</span>
         </div>
-        <div class="side-ver">NOTEFLY v1.7</div>
+        <div class="side-ver">NOTEFLY DESKTOP</div>
       </div>
     </el-aside>
 
@@ -802,7 +803,7 @@
             </div>
           </div>
           <el-alert type="info" :closable="false" class="mb16 nf-enter nf-enter-2"
-            title="本地版说明：各平台阅读/互动数据需平台开放接口才能自动拉取（蚁小二为云端代拉）。本地版在任务详情里手动登记数据，这里自动聚合。"></el-alert>
+            title="本地版说明：各平台阅读/互动数据需平台开放接口才能自动拉取。本地版在任务详情里手动登记数据，这里自动聚合。"></el-alert>
           <div class="stat-grid nf-enter nf-enter-2">
             <div class="stat-cell" v-for="s in metricCards" :key="s.label">
               <div class="nf-eyebrow">{{ s.eyebrow }}</div>

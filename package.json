@@ -1,6 +1,6 @@
 {
   "name": "notefly",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "private": true,
   "description": "NoteFly · 本地多平台内容分发工作台，单引擎：NoteFly RPA",
   "license": "MIT",

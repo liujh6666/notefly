@@ -134,6 +134,22 @@ if (!gotLock) {
     if (app.isPackaged) {
       process.env.NOTEFLY_DEFAULT_DATA_DIR = path.join(app.getPath("userData"), "data");
     }
+    /* 更新桥：桌面版里 server.js 与主进程同进程，服务端的下载/安装路由
+       借这个全局对象直接调 electron-updater（node 独立跑时没有它，
+       update-routes 自然落到「引导发布页」分支）。download 前必须先
+       checkForUpdates —— electron-updater 的 downloadUpdate 依赖其缓存。 */
+    globalThis.NOTEFLY_UPDATE_BRIDGE = {
+      download: async () => {
+        const c = await updater.check();
+        if (!c.ok) return c;
+        return updater.download();
+      },
+      install: async () => {
+        const guard = await lifecycle.quitForUpdate("安装更新");
+        if (!guard.ok) return guard;
+        return updater.quitAndInstall(false);
+      },
+    };
     require("../server.js");
     /* 等服务就绪 */
     for (let i = 0; i < 40; i++) {

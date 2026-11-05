@@ -1447,6 +1447,9 @@ updateRoutes.registerUpdateRoutes(app, {
      浏览器版与开发态都没有可替换的安装目录，一律引导到发布页。 */
   isDesktop: () =>
     process.env.NOTEFLY_FORM === "desktop" && process.env.NOTEFLY_PACKAGED === "1",
+  /* 更新桥（仅桌面版存在，由 electron/main.js 挂在 globalThis 上）：
+     服务端收到下载/安装请求后经它直接调 electron-updater。 */
+  updateBridge: () => globalThis.NOTEFLY_UPDATE_BRIDGE || null,
 });
 
 /* ---------------- 公众号排版 ----------------
