@@ -1302,7 +1302,7 @@
                   <el-icon class="set-ico"><info-filled /></el-icon>
                   <div class="grow">
                     <div class="strong">
-                      <span class="nf-version" :class="{ 'nf-version-tapped': logUnlockHint }" @click="tapVersion" title="连点 5 次可打开运行日志">NoteFly v1.7</span>
+                      <span class="nf-version" :class="{ 'nf-version-tapped': logUnlockHint }" @click="tapVersion" title="连点 5 次可打开运行日志">NoteFly v{{ cfg.version || "…" }}</span>
                     </div>
                     <div class="muted">本地多平台内容分发工作台 · NoteFly · 数据全部存本机 data/ 目录</div>
                     <!-- 连点版本号 5 次后才出现的日志入口 -->
@@ -1827,7 +1827,7 @@
 </div>
 
 <script>
-const { createApp, reactive, toRefs, computed, onMounted, onBeforeUnmount, ref, watch } = Vue;
+const { createApp, reactive, toRefs, computed, onMounted, onBeforeUnmount, ref, watch, watchEffect } = Vue;
 const { ElMessage, ElMessageBox, ElNotification } = ElementPlus;
 
 /* 平台 ID → 中文名静态表（与 engines/rpa.js 适配器 label 同步）。
@@ -4639,6 +4639,8 @@ const app = createApp({
 
     onMounted(async () => {
       toggleTheme(state.themeDark); // 应用持久化主题
+      /* 浏览器标题随 package.json 版本走（title 是静态 HTML，Vue 插值无效，这里手动同步） */
+      watchEffect(() => { document.title = "NoteFly v" + (state.cfg.version || "…") + " · 多平台分发工作台"; });
       await checkEngine(true); await loadAll();
       loadForbiddenWords();
       /* 消息中心 / 企业内容库 / 更新状态 */
