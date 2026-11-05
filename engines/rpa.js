@@ -48,8 +48,31 @@ const ELECTRON = (() => {
   try { return require("electron"); } catch { return null; }
 })();
 
-/* 内置浏览器（webview）与后台发布窗口共用这个分区，登录态天然共享 */
+/* 内置浏览器（webview）与后台发布窗口共用这个分区，登录态天然共享。
+ * 这是**默认账号**的会话；同平台的额外账号各自有独立分区（persist:acct-<id>），
+ * 分区不同 → cookie 不同 → 两个账号互不串会话。 */
 const PARTITION = "persist:notefly";
+
+/* ---------- 账号 → 分区解析 ----------
+ * 引擎不该知道账号存在哪里（store.json 由服务端管），所以由服务端注入一个解析函数。
+ * 没注入时按「accountId 就是平台 id」处理 —— 即原来的单账号行为。 */
+let accountResolver = null;
+function setAccountResolver(fn) {
+  accountResolver = typeof fn === "function" ? fn : null;
+}
+/** @returns {{id:string, platform:string, partition:string}|null} */
+function accountInfo(accountId) {
+  const id = String(accountId || "");
+  if (!id) return null;
+  if (accountResolver) {
+    try {
+      const r = accountResolver(id);
+      if (r) return r;
+    } catch { /* 解析失败退回旧口径 */ }
+  }
+  /* 兜底：当作默认账号（id = 平台 id，共享分区） */
+  return { id, platform: id, partition: PARTITION };
+}
 
 let ctxPromise = null;
 let ctxHeaded = false;
@@ -186,83 +209,127 @@ async function importState(platform, payload) {
   return { ok: true, cookieCount: out.cookies.length, localStorageCount: ls.length, hasState: out.cookies.length > 0 };
 }
 
-/* ---------- Electron 内置会话：与 webview 共用 persist:notefly ---------- */
+/* ---------- Electron 内置会话：默认账号共用 persist:notefly ---------- */
 let cdpBrowser = null;
 let cdpCtx = null;
 /** Playwright Page -> 隐藏 BrowserWindow */
 const workerWins = new Map();
+/** Playwright Page -> 该页所在分区（复用页面时必须同一账号，否则会串号） */
+const workerPartition = new Map();
+/** 本次进程里用过的全部分区（「清除全部登录态」时要逐个清） */
+const partitionsUsed = new Set();
+/** accountId -> 可见登录窗口 {win, partition} */
+const loginWins = new Map();
 
-async function getCdpContext() {
-  if (cdpCtx) {
-    if (cdpBrowser && cdpBrowser.isConnected()) return cdpCtx;
-    cdpCtx = null;
-    cdpBrowser = null;
-  }
+async function getCdpBrowser() {
+  if (cdpBrowser && cdpBrowser.isConnected()) return cdpBrowser;
+  cdpCtx = null;
   const port = process.env.NOTEFLY_CDP_PORT || "9333";
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  cdpBrowser = browser;
+  browser.on("disconnected", () => {
+    cdpBrowser = null;
+    cdpCtx = null;
+    workerPartition.clear();
+  });
+  return browser;
+}
+
+async function getCdpContext() {
+  if (cdpCtx && cdpBrowser && cdpBrowser.isConnected()) return cdpCtx;
+  const browser = await getCdpBrowser();
   /* 关键：必须复用浏览器里已有的那个 context（内置浏览器所在的分区），
-   * 绝不能 newContext() —— 那会开一个空 context，登录态当场丢失。
-   * 这是 CDP 接管模式下最常见的坑，同类工具（Playwright MCP / browser-use）也都这么处理。 */
+   * 绝不能 newContext() —— 那会开一个空 context，登录态当场丢失。 */
   const ctx = browser.contexts()[0];
   if (!ctx) {
     await browser.close().catch(() => {});
     throw new Error("未找到内置浏览器会话，请重启 NoteFly 桌面版");
   }
-  cdpBrowser = browser;
   cdpCtx = ctx;
-  browser.on("disconnected", () => { cdpBrowser = null; cdpCtx = null; });
   return ctx;
 }
 
-/* 在应用内隐藏窗口打开页面：登录态就是用户在内置浏览器里登录的那一份 */
-async function openElectronPage(url) {
-  const ctx = await getCdpContext();
-  /* 复用本进程之前开过的后台页（只复用自己创建的，绝不劫持用户正在看的标签） */
+/* 建窗 + 取页是「监听 page 事件 + loadURL」的两步动作，并发建窗会分不清
+   哪个事件属于哪扇窗 → 串行化。 */
+let ctxLock = Promise.resolve();
+function withCtxLock(fn) {
+  const p = ctxLock.then(fn, fn);
+  ctxLock = p.then(() => {}, () => {});
+  return p;
+}
+
+/**
+ * 在指定分区开一个隐藏窗口并取出它的 Playwright Page。
+ * 实测（Electron 真机）：CDP 连接把所有 session 的页面都并入同一个 Playwright
+ * context —— 新分区的页面会触发 ctx 的 "page" 事件，**不需要**按 context 差集
+ * 定位；分区之间的 cookie/存储隔离由 Chromium 的 partition 机制保证。
+ */
+async function openWorkerPage(url, partition, cfg = {}) {
+  if (typeof ELECTRON === "undefined" || !ELECTRON) return null;
+  return withCtxLock(async () => {
+    const ctx = await getCdpContext();
+    const before = new Set(ctx.pages());
+    const win = new ELECTRON.BrowserWindow({
+      show: false,
+      width: cfg.width || 1440,
+      height: cfg.height || 960,
+      webPreferences: {
+        partition,
+        backgroundThrottling: false,
+        spellcheck: false,
+      },
+    });
+    const page = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("打开「" + (cfg.label || url) + "」超时：页面没有就绪")), 25000);
+      const onPage = (p) => {
+        if (before.has(p)) return;
+        clearTimeout(timer);
+        ctx.off("page", onPage);
+        resolve(p);
+      };
+      ctx.on("page", onPage);
+      win.loadURL(url).catch(() => {});
+    });
+
+    workerWins.set(page, win);
+    workerPartition.set(page, partition);
+    partitionsUsed.add(partition);
+    page.on("close", () => {
+      try { win.destroy(); } catch { /* 忽略 */ }
+      workerWins.delete(page);
+      workerPartition.delete(page);
+    });
+    await page.waitForLoadState("domcontentloaded", { timeout: 45000 }).catch(() => {});
+    await sleep(600);
+    return page;
+  });
+}
+
+/* 在应用内隐藏窗口打开页面：登录态就是该账号所在分区的那一份 */
+async function openElectronPage(url, partition = PARTITION, cfg = {}) {
+  const targetPartition = partition || PARTITION;
+  /* 复用本进程之前开过的后台页（只复用自己创建的、同分区的、没被任务占用的） */
   let origin = "";
-  try { origin = new URL(url).origin; } catch {}
-  /* 正在被发布任务占用的页面不能复用它，否则检查结束关页会打断任务 */
+  try { origin = new URL(url).origin; } catch { /* 忽略 */ }
   const inUse = new Set();
   for (const [, hs] of activeTasks) for (const h of hs) if (h.page) inUse.add(h.page);
   for (const [p, win] of workerWins) {
     try {
-      if (!win.isDestroyed() && !inUse.has(p) && origin && p.url().startsWith(origin)) {
+      if (!win.isDestroyed() && !inUse.has(p) && workerPartition.get(p) === targetPartition &&
+        origin && p.url().startsWith(origin)) {
         await p.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
         await sleep(300);
         return p;
       }
-    } catch {}
+    } catch { /* 忽略 */ }
   }
-  const before = new Set(ctx.pages());
-  const win = new ELECTRON.BrowserWindow({
-    show: false,
-    width: 1440,
-    height: 960,
-    webPreferences: { partition: PARTITION, backgroundThrottling: false, spellcheck: false },
-  });
-  const page = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("内置浏览器后台页创建超时")), 15000);
-    const onPage = (p) => {
-      if (before.has(p)) return;
-      clearTimeout(timer);
-      ctx.off("page", onPage);
-      resolve(p);
-    };
-    ctx.on("page", onPage);
-    win.loadURL(url).catch(() => {});
-  });
-  workerWins.set(page, win);
-  page.on("close", () => {
-    try { win.destroy(); } catch {}
-    workerWins.delete(page);
-  });
-  await page.waitForLoadState("domcontentloaded", { timeout: 45000 }).catch(() => {});
-  await sleep(600);
-  return page;
+  return openWorkerPage(url, targetPartition, cfg);
 }
 
-async function openPage(url, platform) {
-  if (ELECTRON) return openElectronPage(url); // 桌面版：复用内置会话（不复制 cookie）
-  if (platform) await applyState(platform);
+async function openPage(url, accountId) {
+  const acct = accountId ? accountInfo(accountId) : { id: "", platform: "", partition: PARTITION };
+  if (ELECTRON) return openElectronPage(url, acct.partition, { label: acct.id || acct.platform });
+  if (acct.platform) await applyState(acct.platform);
   const ctx = await getContext();
   const page = await ctx.newPage();
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
@@ -904,41 +971,48 @@ function listPlatforms() {
   }));
 }
 
-/* 填充发布（草稿模式）：逐平台开页填充，返回 targets 状态数组 */
+/* 填充发布：逐个账号开页填充，返回 targets 状态数组
+ * accountIds 里的每一项是**账号 id**（默认账号 id = 平台 id，额外账号如 juejin-2） */
 /* mode: "draft" = 只填内容存草稿（人工检查后手动发）；"publish" = 填完自动点平台发布按钮 */
-async function publish(snapshot, platforms, mode = "draft", opts = {}) {
+async function publish(snapshot, accountIds, mode = "draft", opts = {}) {
   const groupId = "rpa-" + Date.now();
   const handles = [];
   const targets = [];
   const autoPublish = mode === "publish";
-  /* 逐目标进度回调：每确定一个平台的结果就通知调用方持久化
-     （服务端据此做逐目标落盘 —— 第二平台卡死时不丢第一阶段记录） */
+  const labelOf = (acct, adapter) => {
+    const base = (adapter && adapter.label) || acct.platform;
+    return acct.id === acct.platform ? base : `${base}（${acct.id}）`;
+  };
+  /* 逐目标进度回调：每确定一个账号的结果就通知调用方持久化
+     （服务端据此做逐目标落盘 —— 第二账号卡死时不丢第一阶段记录） */
   const notify = () => {
     const t = targets[targets.length - 1];
     if (t && typeof opts.onProgress === "function") {
       try { opts.onProgress(t.platform, t); } catch { /* 回调失败不影响发布 */ }
     }
   };
-  for (const platform of platforms) {
+  for (const accountId of accountIds) {
+    const acct = accountInfo(accountId);
+    const platform = acct.platform;
     const adapter = ADAPTERS[platform];
     if (!adapter) {
-      targets.push({ platform, accountId: platform, status: "failed", error: "无该平台适配器" });
+      targets.push({ platform, accountId, status: "failed", error: "无该平台适配器" });
       logger.error("发布引擎", `无该平台适配器：${platform}`);
       notify();
       continue;
     }
     if (adapter.contentType !== snapshot.type) {
-      targets.push({ platform, accountId: platform, status: "failed", error: `该平台不支持 ${snapshot.type}` });
+      targets.push({ platform, accountId, status: "failed", error: `该平台不支持 ${snapshot.type}` });
       logger.error("发布引擎", `平台不支持该内容类型：${platform}（${snapshot.type}）`);
       notify();
       continue;
     }
     try {
-      const page = await openPage(adapter.composeUrl, platform);
+      const page = await openPage(adapter.composeUrl, accountId);
       const pre = await preflight(page, adapter);
       if (!pre.ok) {
         await page.close().catch(() => {});
-        throw new Error(`${adapter.label} 登录态已失效（${pre.reason}）：请到「账号管理 → 登录」重新登录后再发布`);
+        throw new Error(`${labelOf(acct, adapter)} 登录态已失效（${pre.reason}）：请到「账号管理 → 登录」重新登录后再发布`);
       }
       await adapter.fill(page, snapshot);
       if (autoPublish) {
@@ -946,10 +1020,10 @@ async function publish(snapshot, platforms, mode = "draft", opts = {}) {
            自动提交必须逐平台验证过才放行；草稿能力通过不等于自动提交能力通过 */
         const cap = adapter.capabilities || {};
         if (cap.autoSubmit !== "verified") {
-          handles.push({ platform, page, state: "ready" });
+          handles.push({ platform, accountId, page, state: "ready" });
           targets.push({
-            platform, accountId: platform, status: "ready",
-            error: `「${adapter.label}」自动提交能力未验证，已停在草稿待确认，请在打开的页面人工发布`,
+            platform, accountId, status: "ready",
+            error: `「${labelOf(acct, adapter)}」自动提交能力未验证，已停在草稿待确认，请在打开的页面人工发布`,
             capabilityLimited: true,
           });
           notify();
@@ -959,15 +1033,15 @@ async function publish(snapshot, platforms, mode = "draft", opts = {}) {
            语义：submit 正常返回只能证明「点击了发布且页面接受」→ 记 accepted（已受理）；
            只有拿到作品 ID / 管理页状态 / 公开 URL 等证据（capabilities.verify）才记 success */
         await adapter.submit(page);
-        handles.push({ platform, page, state: "accepted" });
+        handles.push({ platform, accountId, page, state: "accepted" });
         targets.push({
-          platform, accountId: platform, status: "accepted",
+          platform, accountId, status: "accepted",
           evidence: { stage: "submitted", detail: "已点击平台发布按钮，等待平台受理/审核" },
           submittedAt: new Date().toISOString(),
         });
       } else {
-        handles.push({ platform, page, state: "ready" });
-        targets.push({ platform, accountId: platform, status: "ready" });
+        handles.push({ platform, accountId, page, state: "ready" });
+        targets.push({ platform, accountId, status: "ready" });
       }
       notify();
     } catch (e) {
@@ -976,15 +1050,15 @@ async function publish(snapshot, platforms, mode = "draft", opts = {}) {
          记 unknown，必须先核验再决定是否重试 */
       const isTimeout = /timeout|timed out|超时/i.test(msg);
       if (isTimeout && autoPublish) {
-        handles.push({ platform, page: null, state: "unknown" });
+        handles.push({ platform, accountId, page: null, state: "unknown" });
         targets.push({
-          platform, accountId: platform, status: "unknown",
+          platform, accountId, status: "unknown",
           error: "提交超时：平台可能已接收请求，请先到平台后台核验是否已发布，确认未发布再重试",
         });
-        logger.warn("发布引擎", `提交超时（结果未知，需人工核验）：${platform}`, { 错误: msg });
+        logger.warn("发布引擎", `提交超时（结果未知，需人工核验）：${platform}`, { 账号: accountId, 错误: msg });
       } else {
-        targets.push({ platform, accountId: platform, status: "failed", error: autoPublish ? "自动发布失败：" + msg : msg });
-        logger.error("发布引擎", `填充/发布失败：${platform}`, { 错误: msg, 模式: autoPublish ? "直接发布" : "存草稿箱" });
+        targets.push({ platform, accountId, status: "failed", error: autoPublish ? "自动发布失败：" + msg : msg });
+        logger.error("发布引擎", `填充/发布失败：${platform}`, { 账号: accountId, 错误: msg, 模式: autoPublish ? "直接发布" : "存草稿箱" });
       }
       notify();
     }
@@ -1007,7 +1081,7 @@ function revealWorker(page) {
  * 最终是否成功要靠平台结果核验（或人工确认）。超时记 unknown 禁止直接重发。 */
 async function submitTarget(groupId, accountId) {
   const handles = activeTasks.get(groupId) || [];
-  const h = handles.find((x) => x.platform === accountId);
+  const h = handles.find((x) => x.accountId === accountId || (!x.accountId && x.platform === accountId));
   if (!h) return { ok: false, error: "页面句柄已失效（服务重启或已关闭），请重新创建任务" };
   const adapter = ADAPTERS[h.platform];
   try {
@@ -1030,15 +1104,16 @@ async function submitTarget(groupId, accountId) {
   }
 }
 
-/* 单平台重试：重新开页填充（旧句柄失效也可用） */
+/* 单账号重试：重新开页填充（旧句柄失效也可用） */
 async function refillTarget(groupId, accountId, snapshot) {
-  const adapter = ADAPTERS[accountId];
+  const acct = accountInfo(accountId);
+  const adapter = ADAPTERS[acct.platform];
   if (!adapter) return { ok: false, error: "无该平台适配器" };
   if (adapter.contentType !== snapshot.type) {
     return { ok: false, error: `该平台不支持 ${snapshot.type}` };
   }
   const handles = activeTasks.get(groupId) || [];
-  const h = handles.find((x) => x.platform === accountId);
+  const h = handles.find((x) => x.accountId === accountId || (!x.accountId && x.platform === acct.platform));
   try {
     if (h && h.page) await h.page.close().catch(() => {});
     const page = await openPage(adapter.composeUrl, accountId);
@@ -1052,7 +1127,7 @@ async function refillTarget(groupId, accountId, snapshot) {
       h.page = page;
       h.state = "ready";
     } else {
-      handles.push({ platform: accountId, page, state: "ready" });
+      handles.push({ platform: acct.platform, accountId, page, state: "ready" });
       activeTasks.set(groupId, handles);
     }
     return { ok: true, status: "ready" };
@@ -1061,30 +1136,170 @@ async function refillTarget(groupId, accountId, snapshot) {
   }
 }
 
-/* 登录检查（无头运行，不弹窗口；桌面版复用内置浏览器会话）
- * 返回 method 说明判定来源：api=平台接口 / dom=页面元素兜底 */
-async function checkLogin(platform) {
-  const adapter = ADAPTERS[platform];
-  if (!adapter) return { ok: false, error: "未知平台" };
+/* 登录检查（无头运行，不弹窗口；桌面版复用该账号所在分区的会话）
+ * @param {string} accountId 账号 id（默认账号即平台 id）
+ * 返回 method 说明判定来源：api=平台接口 / dom=页面元素兜底
+ * 已登录时尽力抓取账号身份（昵称/头像/公开主页）—— 抓不到就留空，绝不编造 */
+async function checkLogin(accountId) {
+  const acct = accountInfo(accountId);
+  const adapter = ADAPTERS[acct.platform];
+  if (!adapter) return { ok: false, error: "未知平台", accountId: acct.id };
   const checkedAt = new Date().toISOString();
   let page = null;
   try {
-    page = await openPage(loginUrlOf(adapter), platform);
+    page = await openPage(loginUrlOf(adapter), accountId);
     const v = await verifyLogin(page, adapter);
-    return { ok: true, loggedIn: v.loggedIn, method: v.method, detail: v.detail, checkedAt };
+    let identity = null;
+    if (v.loggedIn) {
+      identity = await captureProfile(page, adapter).catch(() => null);
+    }
+    return {
+      ok: true, loggedIn: v.loggedIn, method: v.method, detail: v.detail, checkedAt,
+      accountId: acct.id, platform: acct.platform, identity,
+    };
   } catch (e) {
-    return { ok: false, error: String(e.message || e).slice(0, 300), checkedAt };
+    return { ok: false, error: String(e.message || e).slice(0, 300), checkedAt, accountId: acct.id };
   } finally {
     if (page) await page.close().catch(() => {});
   }
 }
 
-/* 降级方案（纯浏览器访问时用）：弹出可见窗口人工登录，登录态留在 data/browser-profile */
-async function openForLogin(platform) {
-  const adapter = ADAPTERS[platform];
+/* ---------- 账号身份抓取 ----------
+ * 平台接口能给出结构化身份最好（adapter.profile 自己实现）；
+ * 否则从页面 DOM 里找「头像 + 昵称 + 指向个人主页的链接」。
+ * 原则：宁可空着，也不拿平台首页冒充「我的主页」—— 那会让用户点了跳到错误的地方。 */
+const PERSONAL_PATH_RE = /\/(user|u|profile|member|space|author|people|creator)(\/|$|\?|#)/i;
+
+async function captureProfile(page, adapter) {
+  if (adapter && typeof adapter.profile === "function") {
+    try {
+      const r = await adapter.profile(page);
+      if (r && (r.username || r.homeUrl || r.avatar)) return normalizeIdentity(r);
+    } catch { /* 实现失败退回通用抓取 */ }
+  }
+  const raw = await page.evaluate(() => {
+    const vis = (el) => !!(el && (el.offsetWidth || el.offsetHeight || (el.getClientRects && el.getClientRects().length)));
+    const txt = (el) => String((el && (el.innerText || el.textContent)) || "").trim();
+    let avatar = "";
+    let homeUrl = "";
+    for (const img of document.querySelectorAll("img")) {
+      const cls = typeof img.className === "string" ? img.className : "";
+      if (!/avatar|head|portrait|profile/i.test(cls + " " + (img.alt || ""))) continue;
+      if (!vis(img)) continue;
+      const src = img.currentSrc || img.src || "";
+      if (src.startsWith("data:") || !src) continue;
+      const link = img.closest && img.closest("a[href]");
+      const href = link ? link.getAttribute("href") || "" : "";
+      avatar = src;
+      if (href && !/login|signin|passport|register/i.test(href)) {
+        try { homeUrl = new URL(href, location.href).href; } catch { homeUrl = ""; }
+      }
+      if (homeUrl) break;
+    }
+    /* 昵称：同类名元素只有一个不同文字才算（列表页会出现多张作者卡） */
+    let username = "";
+    const seen = {};
+    for (const el of document.querySelectorAll(
+      '[class*="nickname"],[class*="user-name"],[class*="userName"],[class*="username"],[class*="account-name"],[class*="user-name"]'
+    )) {
+      const t = txt(el);
+      if (!t || t.length > 24 || !vis(el) || /^(登录|注册|游客|未登录|立即登录)$/.test(t)) continue;
+      const k = typeof el.className === "string" ? el.className : "";
+      (seen[k] = seen[k] || new Set()).add(t);
+    }
+    for (const set of Object.values(seen)) {
+      if (set.size === 1) { username = [...set][0]; break; }
+    }
+    return { username, avatar, homeUrl };
+  }).catch(() => ({}));
+  return normalizeIdentity(raw || {});
+}
+
+function normalizeIdentity(r) {
+  const username = String((r && r.username) || "").trim().slice(0, 40);
+  const avatar = String((r && r.avatar) || "").trim();
+  let homeUrl = String((r && r.homeUrl) || "").trim();
+  /* 只认「看起来是个人主页」的链接；平台首页/登录页一律丢弃 */
+  if (homeUrl && !/^https?:\/\//i.test(homeUrl)) {
+    try { homeUrl = new URL(homeUrl, "https://example.invalid").href; } catch { homeUrl = ""; }
+    if (homeUrl.includes("example.invalid")) homeUrl = "";
+  }
+  if (homeUrl && (!PERSONAL_PATH_RE.test(homeUrl) || /login|signin|passport|register/i.test(homeUrl))) homeUrl = "";
+  if (!username && !avatar && !homeUrl) return null;
+  return { username, avatar: avatar.slice(0, 500), homeUrl, capturedAt: new Date().toISOString() };
+}
+
+/* ---------- 可见登录窗口（额外账号专用） ----------
+ * 默认账号用内置浏览器登录（与历史行为一致）；额外账号必须开独立分区的窗口，
+ * 否则会和默认账号抢同一份 cookie —— 同平台双账号就是这么串的。 */
+async function openAccountLoginWindow(accountId) {
+  const acct = accountInfo(accountId);
+  const adapter = ADAPTERS[acct.platform];
   if (!adapter) throw new Error("未知平台");
+  const url = loginUrlOf(adapter);
+  if (!ELECTRON) {
+    /* 纯浏览器访问：退回 Playwright 可见窗口（登录态落在 data/browser-profile） */
+    await openForLogin(acct.platform);
+    return { ok: true, mode: "playwright", note: "已在独立浏览器窗口打开登录页" };
+  }
+  /* 已开着就聚焦，不重复开窗（重复开窗会让同一个分区出现两份界面） */
+  const existing = loginWins.get(acct.id);
+  if (existing && existing.win && !existing.win.isDestroyed()) {
+    try { existing.win.show(); existing.win.focus(); } catch { /* 忽略 */ }
+    return { ok: true, mode: "window", reused: true, accountId: acct.id };
+  }
+  const page = await openWorkerPage(url, acct.partition, { label: acct.id });
+  const win = workerWins.get(page);
+  if (!win) throw new Error("登录窗口创建失败");
+  loginWins.set(acct.id, { win, page, partition: acct.partition });
+  try { win.show(); win.focus(); } catch { /* 忽略 */ }
+  win.on("closed", () => loginWins.delete(acct.id));
+  return { ok: true, mode: "window", accountId: acct.id, partition: acct.partition };
+}
+
+function closeLoginWindow(accountId) {
+  const w = loginWins.get(String(accountId || ""));
+  if (!w) return { ok: true, closed: false };
+  loginWins.delete(String(accountId || ""));
+  try { if (w.page && !w.page.isClosed()) w.page.close(); } catch { /* 忽略 */ }
+  try { if (w.win && !w.win.isDestroyed()) w.win.destroy(); } catch { /* 忽略 */ }
+  return { ok: true, closed: true };
+}
+
+/* 删除账号时清空它自己的分区（默认账号的共享分区不在这里清：
+   那会把其它平台的登录态一起清掉） */
+async function removeAccountData(accountId) {
+  const acct = accountInfo(accountId);
+  closeLoginWindow(acct.id);
+  if (acct.partition === PARTITION) {
+    return { ok: false, error: "默认账号与内置浏览器共用会话，不能单独清除（请用「清除全部登录态」）" };
+  }
+  /* 先关掉该分区的所有窗口，再清存储 —— 页面还开着时清 cookie 会被写回 */
+  for (const [page, win] of workerWins) {
+    if (workerPartition.get(page) !== acct.partition) continue;
+    try { if (!page.isClosed()) await page.close(); } catch { /* 忽略 */ }
+    try { win.destroy(); } catch { /* 忽略 */ }
+  }
+  if (ELECTRON) {
+    try { await ELECTRON.session.fromPartition(acct.partition).clearStorageData(); } catch { /* 忽略 */ }
+  }
+  partitionsUsed.delete(acct.partition);
+  return { ok: true };
+}
+
+/* 打开人工登录入口。
+ * 桌面版：开**可见**窗口（按账号分区，额外账号与默认账号互不串会话）；
+ * 否则：Playwright 可见浏览器（登录态留在 data/browser-profile）。 */
+async function openForLogin(accountId) {
+  const acct = accountInfo(accountId);
+  const adapter = ADAPTERS[acct.platform];
+  if (!adapter) throw new Error("未知平台");
+  if (ELECTRON) {
+    const r = await openAccountLoginWindow(acct.id);
+    return Object.assign({ ok: true, note: "已在独立登录窗口打开平台登录页，登录完回来点「完成登录」" }, r);
+  }
   await getContext({ headed: true });
-  await openPage(loginUrlOf(adapter), platform);
+  await openPage(loginUrlOf(adapter), acct.id);
   return { ok: true, note: "已在打开的浏览器窗口中人工登录，登录态会保留" };
 }
 
@@ -1103,17 +1318,22 @@ async function closeAll() {
     }
   }
   activeTasks.clear();
+  for (const [, w] of loginWins) {
+    try { if (w.page && !w.page.isClosed()) w.page.close(); } catch {}
+    try { w.win.destroy(); n++; } catch {}
+  }
+  loginWins.clear();
   for (const [, win] of workerWins) {
     try { win.destroy(); n++; } catch {}
   }
   workerWins.clear();
+  workerPartition.clear();
   return n;
 }
 
 /* 清理浏览器配置目录（登录态全失！需用户确认） */
 async function clearProfile() {
-  for (const [, win] of workerWins) { try { win.destroy(); } catch {} }
-  workerWins.clear();
+  await closeAll();
   try {
     if (ctxPromise) {
       const ctx = await ctxPromise;
@@ -1127,6 +1347,11 @@ async function clearProfile() {
   /* 桌面版：内置浏览器分区的登录态也一起清掉 */
   if (ELECTRON) {
     try { await ELECTRON.session.fromPartition(PARTITION).clearStorageData(); } catch {}
+    /* 本次进程里建过的额外账号分区也一起清 —— 「清除全部登录态」必须说到做到 */
+    for (const p of partitionsUsed) {
+      if (p === PARTITION) continue;
+      try { await ELECTRON.session.fromPartition(p).clearStorageData(); } catch {}
+    }
   }
   return true;
 }
@@ -1141,12 +1366,21 @@ async function resetContext() {
   ctxPromise = null;
   ctxHeaded = false;
   stateApplied.clear();
+  /* CDP 连接也要断：否则下次拿到的是已经销毁窗口的旧 context */
+  if (cdpBrowser) {
+    try { await cdpBrowser.close(); } catch {}
+  }
+  cdpBrowser = null;
+  cdpCtx = null;
+  workerPartition.clear();
   return true;
 }
 
 module.exports = {
   listPlatforms, publish, submitTarget, refillTarget, checkLogin, openForLogin, importState,
   hasHandles, closeAll, clearProfile, resetContext, resolveLocalMedia,
+  /* 独立账号：账号 → 平台/分区解析、独立登录窗口、身份抓取、删号清分区 */
+  setAccountResolver, accountInfo, openAccountLoginWindow, closeLoginWindow, removeAccountData, captureProfile,
   /* 供回归测试观察内部状态（可见性升级、平台能力表） */
-  _internals: { getContext, hasOpenWorkers, ADAPTERS, loginUrlOf, resetContext },
+  _internals: { getContext, hasOpenWorkers, ADAPTERS, loginUrlOf, resetContext, loginWins },
 };

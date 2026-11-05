@@ -19,6 +19,7 @@ const progressRoutes = require("./lib/progress-routes");
 const library = require("./lib/content-library");
 const libraryRoutes = require("./lib/library-routes");
 const updateRoutes = require("./lib/update-routes");
+const accounts = require("./lib/accounts");
 
 /* ---- 可控发布替身（仅测试）----
  * NOTEFLY_RPA_STUB=1 时把真实浏览器发布换成内存替身：
@@ -31,13 +32,13 @@ if (process.env.NOTEFLY_RPA_STUB === "1") {
   rpa.publish = async (snapshot, accountIds, mode, hooks) => {
     const targets = [];
     for (const id of accountIds || []) {
-      const platform = String(id).split("-")[0];
+      const platform = accounts.platformOf(String(id), store.accounts);
       if (STUB_DELAY_MS) await stubSleep(STUB_DELAY_MS);
       if (hooks && hooks.onProgress) {
-        hooks.onProgress(platform, { platform, status: "filling" });
-        hooks.onProgress(platform, { platform, status: "published" });
+        hooks.onProgress(platform, { platform, accountId: id, status: "filling" });
+        hooks.onProgress(platform, { platform, accountId: id, status: "published" });
       }
-      targets.push({ platform, status: "published", url: "https://example.com/" + platform });
+      targets.push({ platform, accountId: id, status: "published", url: "https://example.com/" + platform });
     }
     return { groupId: "stub_" + Date.now().toString(36), targets, mode: mode || "draft" };
   };
@@ -166,6 +167,8 @@ function defaultStore() {
     contents: [],   // 内容库 {id,type,title,body,cover,images,tags,video,audio,createdAt}
     tasks: [],      // 发布任务 {id,groupId,accountIds,platforms,contentId,snapshot,scheduledAt,status,createdAt,history:[]}
     accountMeta: {},// accountId -> {alias, group}
+    accounts: [],   // 额外账号 [{id,platform,alias,group,createdAt}]（默认账号是虚拟的，不落盘）
+    accountIdentity: {}, // accountId -> {username,avatar,homeUrl,capturedAt}（登录检查时抓取）
   };
 }
 /* 补齐缺失的顶层键：老数据文件/手工编辑过的文件可能缺字段，缺了就补，绝不能崩 */
@@ -173,6 +176,8 @@ function normalizeStore(s) {
   s.contents = Array.isArray(s.contents) ? s.contents : [];
   s.tasks = Array.isArray(s.tasks) ? s.tasks : [];
   s.accountMeta = s.accountMeta && typeof s.accountMeta === "object" && !Array.isArray(s.accountMeta) ? s.accountMeta : {};
+  s.accounts = accounts.normalizeAccountList(s.accounts);
+  s.accountIdentity = s.accountIdentity && typeof s.accountIdentity === "object" && !Array.isArray(s.accountIdentity) ? s.accountIdentity : {};
   return s;
 }
 function normalizeConfig(c) {
@@ -191,6 +196,10 @@ function normalizeConfig(c) {
 
 let config = normalizeConfig(loadJSON(dataDir.configFile(), defaultConfig()));
 let store = normalizeStore(loadJSON(dataDir.storeFile(), defaultStore()));
+
+/* 发布引擎只认「账号 id」，不直接读 store：这里注入解析函数。
+   每次调用都现读 store.accounts，切换数据目录后自动跟着换。 */
+rpa.setAccountResolver((accountId) => accounts.resolve(accountId, store.accounts));
 
 /* 写入路径每次求值：目录切换后必须写到新位置 */
 const saveStore = () => saveJSON(dataDir.storeFile(), store);
@@ -345,7 +354,9 @@ async function startTask(task) {
      未验证的平台即使选了「立即发布」也会停在草稿待确认，这里提前告知用户。 */
   try {
     const caps = rpa.listPlatforms();
-    const picked = caps.filter((p) => (task.accountIds || []).includes(p.id));
+    /* 账号 id → 平台 id：同一个平台的两个账号共享同一套能力结论 */
+    const plats = (task.accountIds || []).map((id) => accounts.platformOf(id, store.accounts));
+    const picked = caps.filter((p) => plats.includes(p.id));
     const noAuto = picked.filter((p) => !p.capabilities || p.capabilities.autoSubmit !== "verified");
     task.capabilityNotice = (task.mode === "publish" && noAuto.length)
       ? `以下平台自动提交能力未验证，将停在草稿待确认（需人工在平台页面发布）：${noAuto.map((p) => p.label).join("、")}`
@@ -491,6 +502,19 @@ async function executeRpaTask(task) {
      「发布进行中却被判定无在途任务」而错误退出。 */
   let progressId = null;
   let progressDone = false;
+  /* 先把所有待发账号登记成 pending：否则第一个账号一发完，
+     状态归并会认为「全部目标都成功了」把任务标成 done，后面几个账号还在跑。 */
+  try {
+    const seed = {};
+    for (const id of (task.accountIds || [])) {
+      const acct = accounts.resolve(id, store.accounts);
+      seed[id] = { platform: acct ? acct.platform : id, accountId: id, status: "pending" };
+    }
+    task.progressTargets = Object.assign(seed, task.progressTargets || {});
+    task.lastStatus = { targets: Object.values(task.progressTargets), updatedAt: new Date().toISOString() };
+    taskStatus.syncTask(task);
+    saveStore();
+  } catch { /* 登记失败不阻塞执行：最坏情况是状态短暂显示不完整 */ }
   try {
     const p = taskProgress.create({
       type: "publish",
@@ -531,15 +555,17 @@ async function executeRpaTask(task) {
   };
   try {
     const result = await rpa.publish(task.snapshot, task.accountIds, task.mode || "draft", {
-      /* 逐目标持久化：第一个平台完成就落盘，第二个平台卡死也不丢第一阶段记录 */
+      /* 逐目标持久化：第一个账号完成就落盘，第二个卡死也不丢第一阶段记录。
+         键必须是 accountId —— 同平台两个账号按 platform 做键会互相覆盖。 */
       onProgress: (platform, target) => {
         try {
           if (activeRuns.get(task.id) !== runToken) return;   // 已被超时作废
-          task.progressTargets = Object.assign({}, task.progressTargets, { [platform]: target });
+          const key = target.accountId || platform;
+          task.progressTargets = Object.assign({}, task.progressTargets, { [key]: target });
           task.lastStatus = { targets: Object.values(task.progressTargets), updatedAt: new Date().toISOString() };
           taskStatus.syncTask(task);
           task.history = task.history || [];
-          task.history.push({ at: new Date().toISOString(), event: "target_progress", detail: `${platform} → ${target.status}` });
+          task.history.push({ at: new Date().toISOString(), event: "target_progress", detail: `${key} → ${target.status}` });
           saveStore();
           /* 同步推进进度中心：已落定的目标数做分子，平台状态做人话阶段 */
           if (progressId && !progressDone) {
@@ -563,9 +589,26 @@ async function executeRpaTask(task) {
       finishProgress(task);
       return task;
     }
-    /* 合并逐目标进度与最终结果：最终结果优先，进度补齐没走完的目标 */
+    /* 合并逐目标进度与最终结果：最终结果优先，进度补齐没走完的目标。
+       同样按 accountId 作键 —— 同平台两个账号是两个独立目标。 */
     const merged = Object.assign({}, task.progressTargets || {});
-    for (const t of (result && result.targets) || []) merged[t.platform] = t;
+    const reported = new Set();
+    for (const t of (result && result.targets) || []) {
+      const key = t.accountId || t.platform;
+      merged[key] = t;
+      reported.add(key);
+    }
+    /* 引擎没回报的账号不能永远停在 pending（那会让任务永远「进行中」）：
+       如实标成结果未知，要求人工核验 */
+    for (const [key, t] of Object.entries(merged)) {
+      if (reported.has(key)) continue;
+      if (t && (t.status === "pending" || t.status === "filling")) {
+        merged[key] = Object.assign({}, t, {
+          status: "unknown",
+          error: "引擎没有回报该账号的执行结果，请到平台后台核验后再决定是否重试",
+        });
+      }
+    }
     applyRpaResult(task, {
       groupId: result && result.groupId,
       targets: Object.values(merged),
@@ -766,6 +809,8 @@ app.post("/api/data-dir", async (req, res) => {
   store.contents = newStore.contents;
   store.tasks = newStore.tasks;
   store.accountMeta = newStore.accountMeta;
+  store.accounts = newStore.accounts;
+  store.accountIdentity = newStore.accountIdentity;
   Object.assign(config, newConfig);
 
   /* 登录态随目录迁移了，但已开的浏览器上下文还指着旧路径：关掉，下次发布时按新目录重开 */
@@ -813,6 +858,8 @@ app.post("/api/data-dir/reset", async (req, res) => {
   store.contents = newStore.contents;
   store.tasks = newStore.tasks;
   store.accountMeta = newStore.accountMeta;
+  store.accounts = newStore.accounts;
+  store.accountIdentity = newStore.accountIdentity;
   Object.assign(config, newConfig);
   try {
     await rpa.closeAll();
@@ -877,22 +924,23 @@ app.post("/api/rpa/import-state", async (req, res) => {
 });
 app.post("/api/rpa/checklogin", async (req, res) => {
   try {
-    const r = await rpa.checkLogin(req.body.platform);
-    /* 单平台检查结果回写进巡检缓存，账号列表即时可见（含上次检查时间与判定方式） */
+    /* accountId 优先；老调用方只传 platform 时按默认账号处理（行为不变） */
+    const raw = req.body || {};
+    const accountId = raw.accountId || raw.platform;
+    const r = await rpa.checkLogin(accountId);
+    const acc = allAccounts().find((a) => a.id === (r.accountId || accountId));
+    const platform = acc ? acc.platform : (r.platform || raw.platform || accountId);
+    /* 检查结果回写进巡检缓存，账号列表即时可见（含上次检查时间与判定方式） */
     if (r.ok) {
-      const details = config.kaState.details || [];
-      const e = details.find((x) => x.id === req.body.platform);
       const patch = { online: !!r.loggedIn, checkedAt: r.checkedAt || new Date().toISOString(), method: r.method || "", error: "", judge: LOGIN_JUDGE_VERSION };
-      if (e) Object.assign(e, patch);
-      else details.push({ platform: req.body.platform, id: req.body.platform, ...patch });
-      config.kaState.details = details;
-      saveConfig();
+      if (r.identity) patch.identity = r.identity;
+      writeLoginDetail(accountId, platform, patch);
     }
-    if (r.loggedIn) logger.info("登录引擎", `登录检查：${req.body.platform} 已登录（判定方式 ${r.method || "未知"}）`);
-    else logger.warn("登录引擎", `登录检查：${req.body.platform} 未登录`, { 原因: r.reason || r.error || "" });
+    if (r.loggedIn) logger.info("登录引擎", `登录检查：${accountId} 已登录（判定方式 ${r.method || "未知"}）`);
+    else logger.warn("登录引擎", `登录检查：${accountId} 未登录`, { 原因: r.reason || r.error || "" });
     res.json(r);
   } catch (e) {
-    logger.error("登录引擎", `登录检查失败：${String(e.message || e)}`, { 平台: req.body.platform });
+    logger.error("登录引擎", `登录检查失败：${String(e.message || e)}`, { 账号: (req.body || {}).accountId || (req.body || {}).platform });
     res.status(400).json({ error: String(e.message || e) });
   }
 });
@@ -917,62 +965,168 @@ app.get("/api/platforms", (req, res) => {
   res.json({ platforms: rpa.listPlatforms() });
 });
 
-/* 账号（带本地分组/别名；来自 RPA 适配器平台） */
+/* ---------------- 账号管理 ----------------
+ * 一个平台可以有多个账号：
+ *  - 默认账号：id = 平台 id（如 juejin），用内置浏览器那份会话（persist:notefly），
+ *    虚拟记录不落盘 —— 旧任务记录里的 accountIds 因此完全兼容。
+ *  - 额外账号：id 如 juejin-2，各自独立分区（persist:acct-juejin-2），
+ *    登录必须开独立窗口，否则两个账号会抢同一份 cookie。 */
+function accountDetailsMap() {
+  const m = {};
+  for (const d of (config.kaState.details || [])) {
+    if (d && d.id) m[d.id] = d;
+  }
+  return m;
+}
+
+function allAccounts() {
+  return accounts.buildAccountList(
+    rpa.listPlatforms(),
+    store.accounts,
+    store.accountMeta,
+    store.accountIdentity,
+    accountDetailsMap()
+  );
+}
+
+/** 把巡检缓存写回（按 accountId 索引；默认账号的键就是平台 id，历史数据自动对上） */
+function writeLoginDetail(accountId, platform, patch) {
+  const details = config.kaState.details || [];
+  let e = details.find((x) => x.id === accountId);
+  if (e) Object.assign(e, patch);
+  else {
+    e = { id: accountId, platform, accountId, ...patch };
+    details.push(e);
+  }
+  /* 身份信息单独存，供「访问公开主页」用 */
+  if (patch.identity) {
+    const idn = patch.identity;
+    if (idn.username || idn.homeUrl || idn.avatar) {
+      store.accountIdentity[accountId] = Object.assign({}, store.accountIdentity[accountId], idn);
+    }
+    delete e.identity;
+  }
+  config.kaState.details = details;
+  saveConfig();
+  saveStore();
+  return e;
+}
+
+/* 账号列表 */
 app.get("/api/accounts", async (req, res) => {
-  const kaDetails = config.kaState.details || [];
+  const details = accountDetailsMap();
   let outdated = 0;
-  const accounts = rpa.listPlatforms().map((p) => {
-    const d = kaDetails.find((x) => x.id === p.id);
-    const checkedAt = d?.checkedAt || null;
+  const list = allAccounts().map((a) => {
+    const d = details[a.id];
     /* 旧判定规则得出的结论不可信 → 退回「待检查」，不参与已登录计数 */
     const ruleOld = !!(d && d.checkedAt && d.judge !== LOGIN_JUDGE_VERSION);
     if (ruleOld) outdated++;
-    /* 登录态是「一次性巡检的快照」，不是实时事实。
-       超过有效期（默认 12 小时）就标为 stale —— 前端降级成「待复核」，
-       避免把几小时前的旧结论当成现在还登着。 */
-    const stale = !!(checkedAt && !ruleOld && Date.now() - new Date(checkedAt).getTime() > ACCOUNT_STALE_MS);
-    return {
-      id: p.id,
-      platform: p.platform,
-      displayName: p.label,
-      username: "",
-      avatar: "",
-      /* 只认带时间戳的检查结果；旧缓存（无 checkedAt）视为待检查，避免误报已登录 */
+    /* 登录态是「一次性巡检的快照」，不是实时事实：超过有效期就标 stale，
+       前端降级成「待复核」，避免把几小时前的旧结论当成现在还登着 */
+    const stale = !!(d && d.checkedAt && !ruleOld && Date.now() - new Date(d.checkedAt).getTime() > ACCOUNT_STALE_MS);
+    return Object.assign({}, a, {
       isLoggedIn: d && d.checkedAt && !ruleOld ? d.online : null,
-      checkedAt,
+      checkedAt: (d && d.checkedAt) || "",
+      checkMethod: (d && d.method) || "",
       stale,
       ruleOld,
-      checkMethod: d?.method || "",
-      group: store.accountMeta[p.id]?.group || "未分组",
-      alias: store.accountMeta[p.id]?.alias || "",
-      adapterStatus: p.status,
-      loginUrl: p.loginUrl,
-      homeUrl: p.homeUrl || "",
-    };
+    });
   });
-  res.json({ accounts, outdated });
+  res.status(200).json({ accounts: list, outdated });
 });
+
+/* 新增账号（同平台第 2 个及以后） */
+app.post("/api/accounts", (req, res) => {
+  const platform = String((req.body && req.body.platform) || "").trim();
+  const alias = String((req.body && req.body.alias) || "").trim().slice(0, 30);
+  const pf = rpa.listPlatforms().find((p) => p.id === platform);
+  if (!pf) return res.status(400).json({ error: "未知平台：" + platform });
+  /* 同一个平台最多允许 5 个账号：再多基本是误操作，而且每个账号都是一份独立登录态 */
+  const own = store.accounts.filter((a) => a.platform === platform).length;
+  if (own >= 4) return res.status(400).json({ error: `「${pf.label}」最多添加 5 个账号（含默认账号）` });
+  const id = accounts.nextAccountId(platform, store.accounts);
+  const acc = { id, platform, alias, group: "未分组", createdAt: new Date().toISOString() };
+  store.accounts.push(acc);
+  saveStore();
+  logger.info("账号", `新增账号「${alias || id}」`, { 平台: platform, 账号号: id });
+  res.json({ ok: true, account: Object.assign({}, acc, { displayName: pf.label, isDefault: false, partition: accounts.resolve(id, store.accounts).partition }) });
+});
+
+/* 删除额外账号：连它的独立分区一起清掉（默认账号不能删） */
+app.delete("/api/accounts/:id", async (req, res) => {
+  const id = String(req.params.id || "");
+  const idx = store.accounts.findIndex((a) => a.id === id);
+  if (idx < 0) {
+    return res.status(400).json({ error: accounts.resolve(id, store.accounts) ? "默认账号不能删除（每个平台保留一个默认账号）" : "账号不存在" });
+  }
+  const acc = store.accounts[idx];
+  try {
+    await rpa.removeAccountData(id);
+  } catch (e) {
+    return res.status(500).json({ error: "清除账号会话失败：" + String(e.message || e) });
+  }
+  store.accounts.splice(idx, 1);
+  delete store.accountIdentity[id];
+  delete store.accountMeta[id];
+  config.kaState.details = (config.kaState.details || []).filter((d) => d.id !== id);
+  saveStore();
+  saveConfig();
+  logger.info("账号", `已删除账号「${acc.alias || id}」及其独立登录态`, { 平台: acc.platform });
+  res.json({ ok: true });
+});
+
+/* 登录入口：默认账号走内置浏览器（前端处理），额外账号开独立可见窗口 */
+app.post("/api/accounts/:id/login", async (req, res) => {
+  const acc = allAccounts().find((a) => a.id === req.params.id);
+  if (!acc) return res.status(404).json({ error: "账号不存在" });
+  if (acc.isDefault) {
+    return res.json({ ok: true, builtin: true, accountId: acc.id, note: "默认账号在内置浏览器登录（与发布引擎共用会话）" });
+  }
+  try {
+    const r = await rpa.openAccountLoginWindow(acc.id);
+    logger.info("账号", `打开独立登录窗口：${acc.alias || acc.id}`, { 平台: acc.platform, 分区: acc.partition });
+    res.json(Object.assign({ ok: true, accountId: acc.id, label: acc.alias || acc.displayName }, r));
+  } catch (e) {
+    logger.error("账号", `打开登录窗口失败：${acc.id}`, { 错误: String(e.message || e) });
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+/* 关闭该账号的登录窗口（完成登录 / 取消都调它） */
+app.post("/api/accounts/:id/close-login", (req, res) => {
+  try {
+    res.json(rpa.closeLoginWindow(req.params.id));
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
 app.post("/api/accounts/:id/meta", (req, res) => {
+  const id = String(req.params.id || "");
   const { alias, group } = req.body || {};
-  const m = store.accountMeta[req.params.id] || (store.accountMeta[req.params.id] = {});
-  if (alias !== undefined) m.alias = alias;
-  if (group !== undefined) m.group = group;
+  const extra = store.accounts.find((a) => a.id === id);
+  if (extra) {
+    if (alias !== undefined) extra.alias = String(alias || "").slice(0, 30);
+    if (group !== undefined) extra.group = String(group || "未分组").slice(0, 20);
+  } else {
+    /* 默认账号的别名/分组继续存 accountMeta（历史数据位置不变） */
+    const m = store.accountMeta[id] || (store.accountMeta[id] = {});
+    if (alias !== undefined) m.alias = alias;
+    if (group !== undefined) m.group = group;
+  }
   saveStore();
   res.json({ ok: true });
 });
-/* 刷新登录态：重新跑一次该平台的登录检测，并回写巡检缓存 */
+
+/* 刷新登录态：重新跑一次该账号的登录检测，并回写巡检缓存 */
 app.post("/api/accounts/:id/refresh", async (req, res) => {
-  const platform = req.params.id;
+  const acc = allAccounts().find((a) => a.id === req.params.id);
+  if (!acc) return res.status(404).json({ error: "账号不存在" });
   try {
-    const r = await rpa.checkLogin(platform);
-    const details = config.kaState.details || [];
-    const e = details.find((x) => x.id === platform);
-    const patch = { online: !!r.loggedIn, checkedAt: r.checkedAt || new Date().toISOString(), method: r.method || "", error: "" };
-    if (e) Object.assign(e, patch);
-    else details.push({ platform, id: platform, ...patch });
-    config.kaState.details = details;
-    saveConfig();
-    res.json({ ok: true, ...r });
+    const r = await rpa.checkLogin(acc.id);
+    const patch = { online: !!r.loggedIn, checkedAt: r.checkedAt || new Date().toISOString(), method: r.method || "", error: "", judge: LOGIN_JUDGE_VERSION };
+    if (r.identity) patch.identity = r.identity;
+    writeLoginDetail(acc.id, acc.platform, patch);
+    res.json(Object.assign({ ok: true }, r));
   } catch (e) {
     res.status(400).json({ error: String(e.message || e) });
   }
@@ -1076,6 +1230,12 @@ app.delete("/api/contents/:id", (req, res) => {
 app.post("/api/publish", async (req, res) => {
   const { contentId, snapshot, accountIds, scheduledAt, title, mode } = req.body || {};
   if (!accountIds || !accountIds.length) return res.status(400).json({ error: "请至少选择一个账号" });
+  /* 账号必须真实存在（默认账号或已添加的额外账号）。
+     已删除账号的老任务重放时要明确报错 —— 静默跳过或误发到同平台另一个账号都是事故 */
+  const unknownAccounts = accountIds.filter((id) => !accounts.resolve(String(id), store.accounts));
+  if (unknownAccounts.length) {
+    return res.status(400).json({ error: "账号不存在或已删除：" + unknownAccounts.join("、") + "，请重新选择账号" });
+  }
   const pubMode = mode === "publish" ? "publish" : "draft";
   const snap = snapshot || (() => {
     const c = store.contents.find((x) => x.id === contentId);
@@ -1440,19 +1600,23 @@ async function runKeepAlive() {
   kaRunning = true;
   try {
     let details = [];
-    /* 逐平台打开首页检查登录态（页面即开即关） */
-    for (const p of rpa.listPlatforms()) {
-      const r = await rpa.checkLogin(p.id).catch((e) => ({ ok: false, error: String(e.message || e) }));
-      details.push({
-        platform: p.label,
-        id: p.id,
+    /* 逐账号打开首页检查登录态（页面即开即关）—— 同平台的额外账号也要巡检，
+       否则第二个账号掉线没人知道 */
+    const list = allAccounts();
+    for (const a of list) {
+      const r = await rpa.checkLogin(a.id).catch((e) => ({ ok: false, error: String(e.message || e) }));
+      const patch = {
         online: !!(r.ok && r.loggedIn),
         error: r.ok ? "" : r.error || "",
         checkedAt: r.checkedAt || new Date().toISOString(),
         method: r.method || "",
         /* 判定规则版本：规则升级后旧结论会被自动作废 */
         judge: LOGIN_JUDGE_VERSION,
-      });
+      };
+      if (r.identity && (r.identity.username || r.identity.homeUrl || r.identity.avatar)) {
+        store.accountIdentity[a.id] = Object.assign({}, store.accountIdentity[a.id], r.identity);
+      }
+      details.push(Object.assign({ platform: a.displayName, id: a.id, accountId: a.id, platformId: a.platform }, patch));
     }
     const intervalH = config.keepalive.intervalHours || 4;
     config.kaState = {
@@ -1464,6 +1628,7 @@ async function runKeepAlive() {
       nextRun: new Date(Date.now() + intervalH * 3600 * 1000 * (0.9 + Math.random() * 0.2)).toISOString(),
     };
     saveConfig();
+    saveStore();
     return { ok: true, ...config.kaState };
   } finally {
     kaRunning = false;

@@ -350,10 +350,12 @@
                   <el-table-column label="账号" min-width="200">
                     <template #default="{ row }">
                       <div class="acct-cell">
-                        <el-avatar :size="34" :src="row.avatar">{{ (row.alias || row.displayName || "?")[0] }}</el-avatar>
+                        <el-avatar :size="34" :src="row.avatar">{{ (row.alias || row.username || row.displayName || "?")[0] }}</el-avatar>
                         <div>
-                          <div class="strong">{{ row.alias || row.displayName || row.username }}</div>
-                          <div class="nf-dim">{{ row.platform }}</div>
+                          <div class="strong">{{ row.alias || row.username || row.displayName }}</div>
+                          <div class="nf-dim">
+                            {{ row.displayName }}<span v-if="!row.isDefault"> · {{ row.username || row.id }}</span>
+                          </div>
                         </div>
                       </div>
                     </template>
@@ -837,11 +839,12 @@
           <div class="page-head nf-enter nf-enter-1">
             <div>
               <div class="page-head-desc">
-                {{ acctOnline }} 个账号确认在线<span v-if="acctStale"> · {{ acctStale }} 个待复核</span> · 共 {{ acctTotal }} 个平台可接入
+                {{ acctOnline }} 个账号确认在线<span v-if="acctStale"> · {{ acctStale }} 个待复核</span> · 共 {{ acctTotal }} 个账号 / {{ acctPlatforms }} 个平台
               </div>
             </div>
             <div class="nf-row">
               <el-button :loading="checkAllBusy" @click="checkAllLogins">检查登录</el-button>
+              <el-button v-if="engine === 'rpa'" @click="openAcctAdd">添加账号</el-button>
               <el-button v-if="engine === 'rpa'" type="primary" @click="loginPickerVisible = true">登录账号<el-icon class="el-icon--right"><arrow-down /></el-icon></el-button>
             </div>
           </div>
@@ -864,19 +867,20 @@
             <div class="acct-toolbar mb16">
               <el-input v-model="acctSearch" placeholder="搜索平台 / 别名" prefix-icon="Search" clearable style="width: 240px"></el-input>
               <div class="grow"></div>
-              <span class="nf-dim">确认在线 {{ acctOnline }}<span v-if="acctStale"> · 待复核 {{ acctStale }}</span> / 共 {{ accounts.length }} 个平台</span>
+              <span class="nf-dim">确认在线 {{ acctOnline }}<span v-if="acctStale"> · 待复核 {{ acctStale }}</span> / 共 {{ accounts.length }} 个账号</span>
             </div>
             <el-table :data="filteredAccounts" style="width: 100%" empty-text="还没有登录成功的账号 —— 点右上角「登录账号」选择平台开始登录">
-              <el-table-column label="账号信息" min-width="260">
+              <el-table-column label="账号信息" min-width="270">
                 <template #default="{ row }">
                   <div class="acct-cell">
-                    <el-avatar :size="36" :src="row.avatar">{{ (row.alias || row.displayName || "?")[0] }}</el-avatar>
+                    <el-avatar :size="36" :src="row.avatar">{{ (row.alias || row.username || row.displayName || "?")[0] }}</el-avatar>
                     <div>
                       <div class="strong">
-                        {{ row.alias || row.displayName || row.username }}
+                        {{ row.alias || row.username || row.displayName }}
                         <el-tag size="small" :type="loginTag(row)">
                           {{ loginText(row) }}
                         </el-tag>
+                        <el-tag v-if="!row.isDefault" size="small" effect="plain">独立账号</el-tag>
                         <el-tag v-if="row.adapterStatus === 'unverified'" size="small" type="warning">适配器待验证</el-tag>
                       </div>
                       <div class="muted" style="font-size:12px">{{ checkHint(row) }}</div>
@@ -900,14 +904,17 @@
                   </el-select>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="240" align="right">
+              <el-table-column label="操作" width="300" align="right">
                 <template #default="{ row }">
                   <template v-if="engine === 'rpa'">
                     <el-button link type="primary" size="small" @click="startLogin(row)">登录</el-button>
                     <el-button link size="small" @click="rpaCheck(row.id)">检查</el-button>
                   </template>
                   <el-button v-else link type="primary" size="small" @click="refreshAccount(row.id)">刷新登录态</el-button>
+                  <el-button link size="small" :disabled="!homeUrlOf(row)" @click="openAccountHome(row)">主页</el-button>
+                  <el-button link size="small" :disabled="!row.consoleUrl" @click="openAccountConsole(row)">后台</el-button>
                   <el-button link size="small" @click="openAccountMeta(row)">设置</el-button>
+                  <el-button v-if="!row.isDefault" link type="danger" size="small" @click="removeAccount(row)">删除</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -918,9 +925,12 @@
             <div class="login-picker-lead">
               选一个平台后会在内置浏览器打开它的登录页。完成扫码/账号登录后点「完成登录」，
               系统自动检查登录信息，检查通过会关掉页面回到账号管理。
+              <br>
+              要登录<b>同一平台的第二个账号</b>，请先用「添加账号」建一个账号，再在账号列表里点它的「登录」——
+              它会开独立窗口，两个账号互不影响。
             </div>
             <div class="login-grid">
-              <div v-for="a in accounts" :key="a.id" class="login-card" @click="pickLoginPlatform(a)">
+              <div v-for="a in defaultAccounts" :key="a.id" class="login-card" @click="pickLoginPlatform(a)">
                 <span class="plat-dot" :class="loginDot(a)"
                   :title="loginText(a)"></span>
                 <span class="login-card-name">{{ a.displayName }}</span>
@@ -931,6 +941,41 @@
             </div>
             <template #footer>
               <el-button @click="loginPickerVisible = false">取消</el-button>
+            </template>
+          </el-dialog>
+
+          <!-- 添加账号：同一平台可以建多个账号，各自独立登录态 -->
+          <el-dialog v-model="acctAddVisible" title="添加账号" width="480px" class="nf-dialog">
+            <div class="nf-dim" style="margin-bottom: 14px; line-height: 1.7">
+              给同一平台加第二个账号时，新账号有<b>独立登录态</b>：登录它会开一个单独的窗口，
+              不会把默认账号挤下线。
+            </div>
+            <el-form label-width="72px">
+              <el-form-item label="平台">
+                <el-select v-model="acctForm.platform" filterable placeholder="选择平台" style="width: 100%">
+                  <el-option v-for="p in platforms" :key="p.id" :label="p.label" :value="p.id"></el-option>
+                </el-select>
+              </el-form-item>
+              <el-form-item label="账号名">
+                <el-input v-model="acctForm.alias" maxlength="30" placeholder="例如：公司号 / 个人号（可留空）"></el-input>
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="acctAddVisible = false">取消</el-button>
+              <el-button type="primary" :loading="acctAddBusy" @click="createAccount">创建并去登录</el-button>
+            </template>
+          </el-dialog>
+
+          <!-- 额外账号：登录在独立窗口里进行，这里只做确认与关闭 -->
+          <el-dialog :model-value="!!loginExt" title="独立窗口登录" width="520px" class="nf-dialog"
+            @close="cancelLogin">
+            <div style="line-height: 1.8">
+              已为 <b>{{ loginExt && loginExt.label }}</b> 打开独立登录窗口（它与默认账号不是同一份登录态）。
+              请在那个窗口里完成扫码/账号登录，然后回到这里点「完成登录」。
+            </div>
+            <template #footer>
+              <el-button :disabled="loginBusy" @click="cancelLogin">取消</el-button>
+              <el-button type="primary" :loading="loginBusy" @click="finishLogin">完成登录</el-button>
             </template>
           </el-dialog>
         </template>
@@ -1885,9 +1930,11 @@ const app = createApp({
       aiCfg: { preset: "custom", baseUrl: "", apiKey: "", model: "", temperature: 0.7, maxTokens: 4096, timeoutSec: 180, keyMasked: "", ready: false, connected: false },
       aiSaveBusy: false, aiTestBusy: false,
       acctSearch: "", checkAllBusy: false, loginPickerVisible: false,
+      /* 添加账号（同平台第二/第三个账号，独立登录态） */
+      acctAddVisible: false, acctAddBusy: false, acctForm: { platform: "", alias: "" },
       accountsOutdated: 0,   // 因判定规则升级而作废的旧登录态结论条数
       bUrl: "https://juejin.cn/",
-      loginCtx: null,       // 正在内置浏览器里登录的平台 { id, label, url }
+      loginCtx: null,       // 正在登录的账号 { id, label, url, external? }（external=独立窗口）
       loginBusy: false,
       keyCtx: null,         // 正在内置浏览器里申请 API Key 的服务 { name, url }
       isElectron: /Electron/i.test(navigator.userAgent),
@@ -1995,8 +2042,17 @@ const app = createApp({
     };
     /* 内置浏览器快捷方式：只列已登录的平台 + 「新建页面」入口（空 url = 新开空白页自由输入） */
     const bShortcuts = computed(() => {
-      const loggedIn = state.accounts.filter((a) => isLoggedAny(a));
-      return loggedIn.map((a) => ({ label: a.alias || a.displayName || a.platform, url: a.homeUrl || a.loginUrl || "" }));
+      /* 一行一个平台：同平台的额外账号共用同一个平台入口，不重复列 */
+      const seen = new Set();
+      const out = [];
+      for (const a of state.accounts) {
+        if (!isLoggedAny(a)) continue;
+        const key = a.platform || a.id;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ label: a.displayName || a.platform, url: a.homeUrlFallback || a.loginUrl || "" });
+      }
+      return out;
     });
     /* 刊头眉标：让顶栏始终说清"你在哪一块" */
     const pageSection = computed(() => ({
@@ -2090,22 +2146,79 @@ const app = createApp({
     const pubContent = computed(() => state.contents.find((c) => c.id === state.pubContentId));
 
     /* ---------- 账号管理（MultiPost 风格） ---------- */
-    /* 账号列表只显示登录成功的平台；未登录的平台在「登录账号」弹窗里选 */
+    /* 账号列表只显示登录成功的账号；额外账号即使还没登录也要显示，
+       否则刚「添加账号」建出来的那一行会消失，用户没有入口去登录它 */
     const filteredAccounts = computed(() => state.accounts.filter((a) => {
-      if (!isLoggedAny(a)) return false;   /* 只列「曾登录成功」的，含待复核 */
+      if (!isLoggedAny(a) && a.isDefault) return false;
       const q = state.acctSearch.trim().toLowerCase();
-      return !q || [a.alias, a.displayName, a.username, a.platform].some((s) => (s || "").toLowerCase().includes(q));
+      return !q || [a.alias, a.displayName, a.username, a.platform, a.id].some((s) => (s || "").toLowerCase().includes(q));
     }));
     const groupOptions = computed(() => ["未分组", ...Array.from(new Set(state.accounts.map((a) => a.group).filter((g) => g && g !== "未分组")))]);
     const acctTotal = computed(() => state.accounts.length);
+    const acctPlatforms = computed(() => new Set(state.accounts.map((a) => a.platform || a.id)).size);
     /* 「已登录」只统计结果仍在有效期内的；过期的单列为「待复核」 */
     const acctOnline = computed(() => state.accounts.filter((a) => loginState(a) === "on").length);
     const acctStale = computed(() => state.accounts.filter((a) => loginState(a) === "stale").length);
+
+    /* 登录平台弹窗只列每个平台的默认账号（额外账号用「添加账号」建、在账号列表里登录） */
+    const defaultAccounts = computed(() => state.accounts.filter((a) => a.isDefault));
+    /* 额外账号的登录在独立窗口里进行，用弹窗承接「完成登录」动作 */
+    const loginExt = computed(() => (state.loginCtx && state.loginCtx.external ? state.loginCtx : null));
 
     /* 登录平台弹窗 → 进内置浏览器登录 */
     function pickLoginPlatform(a) {
       state.loginPickerVisible = false;
       startLogin(a);
+    }
+
+    /* ---------- 多账号 ---------- */
+    function openAcctAdd() {
+      state.acctForm = { platform: "", alias: "" };
+      state.acctAddVisible = true;
+    }
+    async function createAccount() {
+      const platform = String(state.acctForm.platform || "").trim();
+      if (!platform) return ElMessage.warning("请先选择平台");
+      state.acctAddBusy = true;
+      try {
+        const r = await api("/accounts", { method: "POST", body: { platform, alias: state.acctForm.alias } });
+        if (!r.ok) return ElMessage.error(r.error || "创建失败");
+        state.acctAddVisible = false;
+        await loadAccounts();
+        const row = state.accounts.find((a) => a.id === (r.account && r.account.id));
+        ElMessage.success("账号已创建，接着打开它的独立登录窗口");
+        if (row) await startLogin(row);
+      } catch (e) {
+        ElMessage.error("创建账号失败：" + (e.message || e));
+      } finally {
+        state.acctAddBusy = false;
+      }
+    }
+    async function removeAccount(row) {
+      try {
+        await ElMessageBox.confirm(
+          "删除「" + (row.alias || row.username || row.id) + "」会同时清除它的独立登录态（不会影响同平台的其它账号）。确定删除？",
+          "删除账号", { type: "warning", confirmButtonText: "删除" }
+        );
+      } catch { return; }
+      const r = await api("/accounts/" + row.id, { method: "DELETE" });
+      if (!r.ok) return ElMessage.error(r.error || "删除失败");
+      ElMessage.success("账号已删除");
+      loadAll();
+    }
+    /* 公开主页：抓到真实个人主页就用它；没抓到退回平台首页，并说明清楚 */
+    function homeUrlOf(row) {
+      return row.homeUrl || row.homeUrlFallback || "";
+    }
+    async function openAccountHome(row) {
+      const url = homeUrlOf(row);
+      if (!url) return ElMessage.warning("该平台还没有配置主页地址");
+      if (!row.homeUrl) ElMessage.info("还没抓到该账号的公开主页，先打开平台首页");
+      await openExternal(url);
+    }
+    async function openAccountConsole(row) {
+      if (!row.consoleUrl) return ElMessage.warning("该平台没有配置创作后台地址");
+      await openExternal(row.consoleUrl);
     }
 
     async function saveGroup(row, v) {
@@ -2925,14 +3038,19 @@ const app = createApp({
         }
       } catch { state.engineOk = false; }
     }
+    async function loadAccounts() {
+      const a = await api("/accounts");
+      state.accounts = a.accounts || [];
+      state.accountsOutdated = a.outdated || 0;
+      return state.accounts;
+    }
+
     async function loadAll() {
       const [c, t, s] = await Promise.all([api("/contents"), api("/tasks"), api("/stats")]);
       state.contents = c.contents || [];
       state.tasks = t.tasks || [];
       state.stats = s || {};
-      const a = await api("/accounts");
-      state.accounts = a.accounts || [];
-      state.accountsOutdated = a.outdated || 0;
+      await loadAccounts();
       /* 数据刷新后重排到点唤醒：新建的定时任务要能被及时唤醒 */
       if (nextScheduledAt()) scheduleWake();
     }
@@ -4096,9 +4214,19 @@ const app = createApp({
       if (r.error) return ElMessage.error("打开登录页失败: " + r.error);
       ElMessage.success("已打开独立登录窗口，登录完回来点「检查」");
     }
-    /* 账号管理 → 登录：直接在软件内置浏览器里登录，登录态回传给发布引擎 */
+    /* 账号管理 → 登录
+     * 默认账号：内置浏览器登录（与发布引擎共用同一份会话，零复制）；
+     * 额外账号：服务端开独立窗口（独立分区），否则两个账号会抢同一份 cookie。 */
     async function startLogin(row) {
-      const label = row.displayName || row.alias || row.id;
+      const label = row.alias || row.username || row.displayName || row.id;
+      if (!row.isDefault) {
+        const r = await api("/accounts/" + row.id + "/login", { method: "POST" });
+        if (!r.ok) return ElMessage.error("打开登录窗口失败: " + (r.error || ""));
+        if (r.builtin) return ElMessage.warning("这是默认账号，请用内置浏览器登录");
+        state.loginCtx = { id: row.id, label, url: row.loginUrl || "", external: true };
+        ElMessage.info("已为「" + label + "」打开独立登录窗口，登录完回来点「完成登录」");
+        return;
+      }
       if (!state.isElectron || !window.notefly) {
         return rpaLogin(row.id); // 纯浏览器访问读不到跨域 cookie，退回独立窗口
       }
@@ -4119,10 +4247,27 @@ const app = createApp({
       if (!c) return;
       state.loginBusy = true;
       try {
+        /* 额外账号：登录在独立窗口里，登录态独立，只做校验 + 关窗 */
+        if (c.external) {
+          ElMessage.info("正在确认登录状态…");
+          const ck = await api("/rpa/checklogin", { method: "POST", body: { accountId: c.id } });
+          if (ck.ok && ck.loggedIn) {
+            await api("/accounts/" + c.id + "/close-login", { method: "POST" });
+            state.loginCtx = null;
+            const who = ck.identity && ck.identity.username ? "（" + ck.identity.username + "）" : "";
+            ElMessage.success("「" + c.label + "」登录成功" + who + "，发布引擎已就绪");
+            await loadAll();
+          } else if (ck.ok) {
+            ElMessage.warning("没有检测到登录状态" + (ck.detail ? "（" + ck.detail + "）" : "") + " —— 请确认独立窗口里已完成登录，再点一次「完成登录」");
+          } else {
+            ElMessage.warning("检查未完成：" + (ck.error || ""));
+          }
+          return;
+        }
         /* 桌面版：发布引擎直接复用内置浏览器这份会话，无需复制 cookie，只做校验 */
         if (state.isElectron) {
           ElMessage.info("正在确认登录状态…");
-          const ck = await api("/rpa/checklogin", { method: "POST", body: { platform: c.id } });
+          const ck = await api("/rpa/checklogin", { method: "POST", body: { platform: c.id, accountId: c.id } });
           const a = state.accounts.find((x) => x.id === c.id);
           if (ck.ok) { if (a) { a.isLoggedIn = !!ck.loggedIn; a.stale = false; } }
           if (ck.ok && ck.loggedIn) {
@@ -4167,7 +4312,7 @@ const app = createApp({
         } else {
           ElMessage.info("正在校验登录状态…");
         }
-        const ck = await api("/rpa/checklogin", { method: "POST", body: { platform: c.id } });
+        const ck = await api("/rpa/checklogin", { method: "POST", body: { platform: c.id, accountId: c.id } });
         const a = state.accounts.find((x) => x.id === c.id);
         if (ck.ok && a) {
           a.isLoggedIn = !!ck.loggedIn;
@@ -4197,17 +4342,27 @@ const app = createApp({
       }
     }
     function cancelLogin() {
+      const c = state.loginCtx;
+      if (c && c.external) {
+        /* 独立窗口要一起关掉，否则它会一直挂着占一个分区 */
+        api("/accounts/" + c.id + "/close-login", { method: "POST" }).catch(() => {});
+      }
       state.loginCtx = null;
-      state.page = "accounts";
+      if (state.page === "browser") state.page = "accounts";
     }
-    async function rpaCheck(platform) {
-      const r = await api("/rpa/checklogin", { method: "POST", body: { platform } });
-      const a = state.accounts.find((x) => x.id === platform);
+    async function rpaCheck(accountId) {
+      const r = await api("/rpa/checklogin", { method: "POST", body: { accountId } });
+      const a = state.accounts.find((x) => x.id === accountId);
       if (a) {
         a.isLoggedIn = r.ok ? r.loggedIn : false;
         a.stale = false;
         a.checkedAt = r.checkedAt || new Date().toISOString();
         a.checkMethod = r.method || "";
+        if (r.identity) {
+          if (r.identity.username) a.username = r.identity.username;
+          if (r.identity.avatar) a.avatar = r.identity.avatar;
+          if (r.identity.homeUrl) a.homeUrl = r.identity.homeUrl;
+        }
       }
       if (r.ok && r.loggedIn) ElMessage.success("已登录（" + (r.method === "api" ? "平台接口校验" : "页面校验") + "）");
       else ElMessage.warning(r.ok ? "未登录 —— 请点「登录」重新扫码" : "检查失败: " + (r.error || ""));
@@ -4610,6 +4765,9 @@ const app = createApp({
       filteredAccounts, groupOptions, acctTotal, acctOnline, acctStale, saveGroup, checkAllLogins, checkHint, pickLoginPlatform,
       loginState, loginText, loginDot, loginTag, isLoggedAny,
       bGo, bOpen, bBack, bHome, bNewPage, bShortcuts, startLogin, finishLogin, cancelLogin, pubAccountOptions,
+      /* 多账号：添加/删除、独立窗口登录确认、公开主页与创作后台入口 */
+      defaultAccounts, loginExt, openAcctAdd, createAccount, removeAccount, acctPlatforms,
+      homeUrlOf, openAccountHome, openAccountConsole,
       doPublish, openContentEditor, saveContent, saveDraft, delContent, closeEditor, onMenuSelect, rpaLogin, rpaCheck, refreshAccount, openAccountMeta, saveAccountMeta,
       onNewContentMode, confirmGzhTemplate, gzhThemeName, gzhThemeScene, refreshGzhPreview, onGzhThemeChange, copyGzhHtml, exportGzhHtml, loadGzhTemplates, saveAuthor, gzhAuthor,
       openTargetPlatform, verifyTarget, confirmTarget,
