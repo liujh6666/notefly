@@ -129,6 +129,9 @@ app.whenReady().then(() => {
      总得有个东西告诉他「起来了」。这个变量在 Node 侧设置，
      不依赖 WScript.Shell.Environment（实测会卡死）。 */
   env.NOTEFLY_OPEN_BROWSER = "1";
+  /* 形态标记：浏览器版不允许「下载并安装更新」（没有 Electron 外壳执行安装），
+     服务端据此把更新引导到发布页。桌面版由 electron/main.js 设 NOTEFLY_FORM=desktop。 */
+  env.NOTEFLY_FORM = "browser";
 
   const child = spawn(node, [server], {
     cwd: ROOT,

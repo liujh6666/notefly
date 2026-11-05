@@ -3483,8 +3483,18 @@ const app = createApp({
       ).catch(() => { return; });
       /* 桌面版：走主进程下载 + 安装 */
       if (window.notefly && window.notefly.isElectron) {
-        const dl = await api("/update/download", { method: "POST" });
-        if (!dl.ok) { ElMessage.warning((dl && dl.error) || "无法开始下载"); return; }
+        const dl = await api("/update/download", { method: "POST", body: { releaseUrl: release.url || "" } });
+        if (!dl.ok) {
+          /* 服务端判定当前形态不支持自动安装（浏览器版 / 开发态）→ 兜底打开发布页，不留死路 */
+          const url = (dl && dl.releaseUrl) || release.url || "";
+          if (url) {
+            await openExternal(url);
+            ElMessage.info((dl && dl.error) || "已打开发布页，请手动下载安装");
+          } else {
+            ElMessage.warning((dl && dl.error) || "无法开始下载");
+          }
+          return;
+        }
         ElMessage.info("正在下载更新包，可在消息中心看进度");
         await loadTasks();
         openMsgDrawer();

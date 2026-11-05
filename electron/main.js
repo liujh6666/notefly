@@ -124,6 +124,11 @@ if (!gotLock) {
     }
     /* 内置服务必须与窗口访问同一个端口 */
     process.env.PORT = String(PORT);
+    /* 服务端靠这两个变量判定运行形态：桌面版 + 已打包才允许「下载并安装更新」，
+       其余（浏览器版 / 开发态）一律引导到发布页。必须在 require("../server.js")
+       之前设置 —— 服务端读的是 require 时刻的环境。 */
+    process.env.NOTEFLY_FORM = "desktop";
+    process.env.NOTEFLY_PACKAGED = app.isPackaged ? "1" : "0";
     require("../server.js");
     /* 等服务就绪 */
     for (let i = 0; i < 40; i++) {

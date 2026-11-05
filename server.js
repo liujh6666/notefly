@@ -1442,7 +1442,11 @@ updateRoutes.registerUpdateRoutes(app, {
   getConfig: () => config,
   saveConfig: () => saveConfig(),
   getVersion: () => APP_VERSION,
-  isDesktop: () => process.env.NOTEFLY_DESKTOP === "1",
+  /* 只有「桌面版且已打包」（NOTEFLY_FORM=desktop + NOTEFLY_PACKAGED=1，
+     由 electron/main.js 在 require 本文件前设置）才允许自动下载安装更新；
+     浏览器版与开发态都没有可替换的安装目录，一律引导到发布页。 */
+  isDesktop: () =>
+    process.env.NOTEFLY_FORM === "desktop" && process.env.NOTEFLY_PACKAGED === "1",
 });
 
 /* ---------------- 公众号排版 ----------------
