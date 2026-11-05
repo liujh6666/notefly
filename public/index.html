@@ -1769,7 +1769,7 @@
       :title="'失败原因：' + curTask.error"></el-alert>
     <div v-if="taskTargets.length">
       <div v-for="t in taskTargets" :key="t.accountId" class="task-target">
-        <el-tag size="small" effect="plain" style="width: 110px; text-align: center">{{ t.platform }}</el-tag>
+        <el-tag size="small" effect="plain" style="width: 110px; text-align: center">{{ platformLabel(t.platform) }}</el-tag>
         <el-tag size="small" :type="targetTagType(t.status)">{{ tName[t.status] || t.status }}</el-tag>
         <a v-if="t.postUrl" class="muted" :href="t.postUrl" target="_blank">查看</a>
         <span v-if="t.error" class="muted">{{ t.error }}</span>
@@ -1830,6 +1830,17 @@
 const { createApp, reactive, toRefs, computed, onMounted, onBeforeUnmount, ref, watch } = Vue;
 const { ElMessage, ElMessageBox, ElNotification } = ElementPlus;
 
+/* 平台 ID → 中文名静态表（与 engines/rpa.js 适配器 label 同步）。
+   TaskTable 子组件访问不到主 setup 的 state，发布记录列表直接用它兜底；
+   新增平台时若漏更新，主界面仍会从 /api/rpa/platforms 拿到正确名字 */
+const PLATFORM_LABELS = {
+  juejin: "掘金", zhihu: "知乎专栏", weibo: "微博", csdn: "CSDN", toutiao: "头条号",
+  baijiahao: "百家号", sohu: "搜狐号", oschina: "开源中国", yidian: "一点号", dayu: "大鱼号",
+  weixin: "微信公众号", netease: "网易号", penguin: "企鹅号", jianshu: "简书", cnblogs: "博客园",
+  segmentfault: "思否 SegmentFault", infoq: "InfoQ 写作社区", "51cto": "51CTO博客", bilibili: "B站专栏",
+};
+const platformLabelOf = (key) => PLATFORM_LABELS[key] || key;
+
 /* 任务表格子组件 */
 const TaskTable = {
   props: { tasks: Array, withActions: Boolean },
@@ -1863,7 +1874,7 @@ const TaskTable = {
               : "info";
     const taskStatus = (row) => (row ? statusName[row.status] || row.status : "");
     const fmt = (iso) => (iso ? new Date(iso).toLocaleString("zh-CN", { hour12: false }) : "-");
-    return { typeLabels, statusName, tName, statusTagType, targetTagType, taskStatus, fmt };
+    return { typeLabels, statusName, tName, statusTagType, targetTagType, taskStatus, fmt, platformLabel: platformLabelOf };
   },
   template: `
   <el-table :data="tasks" empty-text="暂无发布任务">
@@ -1888,7 +1899,7 @@ const TaskTable = {
         <el-tooltip v-for="t in ((row.lastStatus && row.lastStatus.targets) || [])" :key="t.accountId"
           :content="t.error || tName[t.status] || t.status" placement="top">
           <el-tag size="small"
-            :type="targetTagType(t.status)" class="mr4" style="cursor: default">{{ t.platform }}:{{ tName[t.status] || t.status }}</el-tag>
+            :type="targetTagType(t.status)" class="mr4" style="cursor: default">{{ platformLabel(t.platform) }}:{{ tName[t.status] || t.status }}</el-tag>
         </el-tooltip>
         <span v-if="!((row.lastStatus && row.lastStatus.targets) || []).length" class="muted">{{ row.status === "queued" ? "排队执行中…" : row.status === "scheduled" ? "定时待发，到点自动执行" : "等待填充…" }}</span>
       </template>
@@ -2126,12 +2137,13 @@ const app = createApp({
       })).filter((x) => x.count > 0);
     });
 
-    /* 平台表现：把平台 ID 换成中文名，并按总量排序 */
+    /* 平台表现：把平台 ID 换成中文名，并按总量排序
+       优先级：账号别名（多账号场景）> 平台清单 label > 静态表 > 原样 */
     const platformLabel = (key) => {
       const hit = state.accounts.find((a) => a.id === key || a.platform === key);
       if (hit) return hit.displayName || hit.alias || key;
       const p = state.rpaPlatforms.find((x) => x.id === key);
-      return p ? p.label : key;
+      return (p && p.label) || platformLabelOf(key);
     };
     const platformRank = computed(() => {
       const by = state.stats.byPlatform || {};
@@ -3865,7 +3877,7 @@ const app = createApp({
         } else if (status === "running") {
           ElMessage.info("任务执行中，可在发布记录中查看各平台进度");
         } else if (status === "done") {
-          ElMessage.success("已确认发布：" + targets.filter((t) => t.status === "success").map((t) => t.platform).join("、"));
+          ElMessage.success("已确认发布：" + targets.filter((t) => t.status === "success").map((t) => platformLabel(t.platform)).join("、"));
         } else if (status === "draft_ready") {
           ElMessage.success("已存入各平台草稿箱（" + targets.length + " 个），检查无误后在发布记录里手动发布");
         } else if (status === "partial") {
@@ -4807,7 +4819,7 @@ const app = createApp({
       });
     }
 
-    return { ...toRefs(state), typeLabels, typeLabel, statusName, tName, statusTagType, targetTagType, taskStatus, fmt, pageTitle, pageDesc, pageSection, engineText, statCards, statusDist, platformRank, pubStep, pubContent, readyTargets,
+    return { ...toRefs(state), typeLabels, typeLabel, statusName, tName, statusTagType, targetTagType, taskStatus, fmt, pageTitle, pageDesc, pageSection, engineText, statCards, statusDist, platformRank, platformLabel, pubStep, pubContent, readyTargets,
       sideW, isRail,
       aiModels, aiPreset, loadAiConfig, applyAiPreset, saveAiConfig, testAi, goAiSettings,
       applyKeySite, disconnectAi, backToAiSettings, closeKeyTip,
