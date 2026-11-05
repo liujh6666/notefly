@@ -256,3 +256,25 @@ test("发布任务执行中不允许切换到可见登录窗口（会中断任�
     await rpa.closeAll();
   }
 });
+
+/* ---- 媒体路径解析（对应验收问题 13：/uploads/ 网页地址被当成磁盘路径）---- */
+test("resolveLocalMedia：/uploads/ 预览地址解析为数据目录真实文件", () => {
+  process.env.NOTEFLY_DATA_DIR = require("fs").mkdtempSync(require("path").join(require("os").tmpdir(), "notefly-media-"));
+  delete require.cache[require.resolve("../lib/data-dir")];
+  delete require.cache[require.resolve("../engines/rpa")];
+  const rpa2 = require("../engines/rpa");
+  const fs2 = require("fs");
+  const path2 = require("path");
+  const dataDir2 = require("../lib/data-dir");
+  fs2.mkdirSync(path2.join(dataDir2.get(), "uploads"), { recursive: true });
+  const real = path2.join(dataDir2.get(), "uploads", "test.png");
+  fs2.writeFileSync(real, "png");
+
+  assert.equal(rpa2.resolveLocalMedia("/uploads/test.png"), require("path").resolve(real), "预览地址必须解析到磁盘文件");
+  assert.equal(rpa2.resolveLocalMedia("/uploads/missing.png"), "", "不存在的文件绝不硬传");
+  assert.equal(rpa2.resolveLocalMedia("https://example.com/a.png"), "", "远程 URL 不能当本地文件");
+  assert.equal(rpa2.resolveLocalMedia(""), "", "空值返回空");
+  const abs = path2.join(dataDir2.get(), "uploads", "test.png");
+  assert.equal(rpa2.resolveLocalMedia(abs), path2.resolve(abs), "已有磁盘路径校验后原样使用");
+  assert.equal(rpa2.resolveLocalMedia(path2.join(dataDir2.get(), "nope.png")), "", "不存在的磁盘路径返回空");
+});

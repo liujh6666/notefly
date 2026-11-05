@@ -17,6 +17,31 @@ const logger = require("../lib/logger");
 const profileDir = () => dataDir.profileDir();
 const stateDir = () => dataDir.stateDir();
 
+/* ---------- 媒体路径解析 ----------
+ * 素材在库里存的是网页预览地址（/uploads/xxx.png），setInputFiles 只认磁盘路径。
+ * 三种形态必须区分清楚，混用会直接上传失败：
+ *   素材 ID        → 不在这里处理（由服务端预先展开）
+ *   /uploads/...   → 解析成当前数据目录下的真实文件，文件不存在就放弃（不猜）
+ *   http(s)://...  → 远程图片，不能当本地文件传，明确返回空
+ *   磁盘绝对路径   → 校验存在后原样使用
+ * @returns {string} 可用的本地磁盘路径；不可用返回 ""
+ */
+function resolveLocalMedia(p) {
+  const s = String(p || "").trim();
+  if (!s) return "";
+  if (/^https?:\/\//i.test(s)) return "";
+  try {
+    if (/^[/\\]uploads[/\\]/i.test(s)) {
+      const rel = s.replace(/^[/\\]+uploads[/\\]/i, "");
+      const abs = path.join(dataDir.get(), "uploads", rel);
+      return fs.existsSync(abs) && fs.statSync(abs).isFile() ? abs : "";
+    }
+    return fs.existsSync(s) && fs.statSync(s).isFile() ? path.resolve(s) : "";
+  } catch {
+    return "";
+  }
+}
+
 /* 是否跑在 Electron 主进程里（桌面版）：是则直接接管内置浏览器会话 */
 const ELECTRON = (() => {
   if (!process.versions.electron) return null;
@@ -488,12 +513,19 @@ const ADAPTERS = {
       const box = await waitSel(page, '.Form_input, [contenteditable="true"][aria-label], .omp-body .DraftEditor-root div[contenteditable="true"]', 20000);
       await box.click();
       await page.keyboard.insertText((snap.title ? snap.title + "\n" : "") + (snap.body || ""));
-      // 图片上传（可选）
+      // 图片上传（可选）：/uploads/... 预览地址必须先解析成磁盘真实文件
       if (snap.images && snap.images.length) {
-        const fileInput = await page.$('input[type="file"]');
-        if (fileInput) {
-          await fileInput.setInputFiles(snap.images.filter((p) => !p.startsWith("http")));
-          await sleep(5000); // 等上传
+        const localFiles = snap.images.map(resolveLocalMedia).filter(Boolean);
+        if (localFiles.length) {
+          const fileInput = await page.$('input[type="file"]');
+          if (fileInput) {
+            await fileInput.setInputFiles(localFiles);
+            await sleep(5000); // 等上传
+          }
+        } else {
+          logger.warn("发布引擎", "微博图片全部无法解析为本地文件，跳过图片上传", {
+            传入: snap.images.join(", ").slice(0, 300),
+          });
         }
       }
       await sleep(1000);
@@ -1114,7 +1146,7 @@ async function resetContext() {
 
 module.exports = {
   listPlatforms, publish, submitTarget, refillTarget, checkLogin, openForLogin, importState,
-  hasHandles, closeAll, clearProfile, resetContext,
+  hasHandles, closeAll, clearProfile, resetContext, resolveLocalMedia,
   /* 供回归测试观察内部状态（可见性升级、平台能力表） */
   _internals: { getContext, hasOpenWorkers, ADAPTERS, loginUrlOf, resetContext },
 };

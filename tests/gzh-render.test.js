@@ -264,3 +264,29 @@ test("合规产物校验通过", () => {
   assert.equal(c.ok, true);
   assert.equal(c.warnings.length, 0);
 });
+
+/* ---- 媒体就绪检查（对应验收问题 14：样式合规与媒体就绪必须分开报）---- */
+test("媒体就绪：/uploads/ 相对地址判定为未就绪并给出可读提示", () => {
+  const gzhValidate = require("../lib/gzh-validate");
+  const html = '<section><span leaf=""><img src="/uploads/2026/11/a.png"></span></section>';
+  const m = gzhValidate.checkMediaReadiness(html);
+  assert.equal(m.ready, false);
+  assert.equal(m.localImages, 1);
+  assert.ok(/公众号|不会显示/.test(m.message), "提示必须告诉用户后果与修法");
+});
+
+test("媒体就绪：外链图片判定为就绪", () => {
+  const gzhValidate = require("../lib/gzh-validate");
+  const html = '<section><span leaf=""><img src="https://mmbiz.qpic.cn/x.png"></span></section>';
+  const m = gzhValidate.checkMediaReadiness(html);
+  assert.equal(m.ready, true);
+  assert.equal(m.remoteImages, 1);
+  assert.equal(m.message, "");
+});
+
+test("媒体就绪：无图片的正文视为就绪", () => {
+  const gzhValidate = require("../lib/gzh-validate");
+  const m = gzhValidate.checkMediaReadiness('<section><span leaf="">纯文字</span></section>');
+  assert.equal(m.ready, true);
+  assert.equal(m.localImages, 0);
+});

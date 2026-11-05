@@ -93,7 +93,10 @@ function init(opts) {
     emit({ type: "not-available", version: info && info.version });
   });
   autoUpdater.on("error", (e) => {
-    emit({ type: "error", error: String((e && e.message) || e) });
+    /* 用户取消下载不是错误：走 download-cancelled 通道，不推「更新失败」 */
+    const msg = String((e && e.message) || e);
+    if ((e && e.name === "CancellationError") || /cancel/i.test(msg)) return;
+    emit({ type: "error", error: msg });
   });
   autoUpdater.on("download-progress", (p) => {
     emit({
@@ -144,7 +147,30 @@ async function download() {
     await autoUpdater.downloadUpdate();
     return { ok: true };
   } catch (e) {
-    return { ok: false, code: "download_failed", error: "下载更新包失败：" + String((e && e.message) || e) };
+    const msg = String((e && e.message) || e);
+    /* 用户取消：明确区分，调用方据此回报 download-cancelled */
+    if ((e && e.name === "CancellationError") || /cancel/i.test(msg)) {
+      return { ok: false, code: "cancelled", cancelled: true, error: "下载已取消" };
+    }
+    return { ok: false, code: "download_failed", error: "下载更新包失败：" + msg };
+  }
+}
+
+/**
+ * 取消正在进行的下载
+ * electron-updater 提供 cancelDownload()；旧版本没有时明确返回不支持，
+ * 绝不假装取消成功（任务会一直卡在「正在停止」）。
+ */
+function cancelDownload() {
+  if (!isSupported()) return { ok: false, code: "dev_mode", error: "开发模式没有下载在进行" };
+  try {
+    if (typeof autoUpdater.cancelDownload !== "function") {
+      return { ok: false, code: "unsupported", error: "当前 electron-updater 版本不支持取消下载" };
+    }
+    autoUpdater.cancelDownload();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
   }
 }
 
@@ -177,6 +203,7 @@ module.exports = {
   init,
   check,
   download,
+  cancelDownload,
   quitAndInstall,
   openReleasePage,
   isSupported,

@@ -246,12 +246,32 @@ async function quit(opts) {
     try { win.show(); } catch { /* 忽略 */ }
   }
 
-  /* 2. 通知渲染进程保存未保存的稿件 */
+  /* 2. 通知渲染进程保存未保存的稿件。
+     保存失败 / 保存超时 / 用户取消都必须中止退出 —— 绝不能带着没保存的稿子销毁窗口。
+     （渲染进程挂死导致回复收不到时按超时处理，同样中止退出；用户可从托盘重试，
+       若反复超时说明渲染进程已无响应，重启应用即可。） */
   let saved = true;
+  let saveNote = "";
   try {
-    saved = await notifyRendererSave(o.reason || "退出");
+    const r = await notifyRendererSave(o.reason || "退出");
+    saved = r.saved;
+    saveNote = r.note || "";
   } catch (e) {
-    saved = true;   /* 通知失败不阻塞退出，但会记录 */
+    saved = false;
+    saveNote = String((e && e.message) || e);
+  }
+  if (!saved && !o.force) {
+    state.phase = "running";
+    try {
+      const { Notification } = require("electron");
+      if (Notification && Notification.isSupported()) {
+        new Notification({
+          title: "退出已推迟：稿件未保存",
+          body: saveNote || "有稿件没有保存成功，已保留窗口与编辑内容。处理后再从托盘退出。",
+        }).show();
+      }
+    } catch { /* 忽略 */ }
+    return { ok: false, error: "稿件保存失败，已保留窗口与编辑内容" };
   }
 
   /* 3. 等待在途任务落定（有超时，不无限等） */
@@ -294,32 +314,33 @@ async function quit(opts) {
 
 /**
  * 让渲染进程保存未保存内容
- * @returns {Promise<boolean>} 是否保存成功
+ * @returns {Promise<{saved:boolean, note:string}>} 保存是否成功（失败/超时都算不成功）
  */
 function notifyRendererSave(reason) {
   const win = state.mainWindow;
-  if (!win || win.isDestroyed()) return Promise.resolve(true);
+  if (!win || win.isDestroyed()) return Promise.resolve({ saved: true, note: "" });
   return new Promise((resolve) => {
     let done = false;
-    const timer = setTimeout(() => {
+    const finish = (saved, note) => {
       if (done) return;
       done = true;
-      resolve(true);   /* 超时按「不阻塞退出」处理 */
+      clearTimeout(timer);
+      ipcMainRemove("notefly:quit-reply", onReply);
+      resolve({ saved, note: note || "" });
+    };
+    const timer = setTimeout(() => {
+      /* 超时按「未确认保存成功」处理：退出被推迟（绝不能带着可能没保存的稿子退出） */
+      finish(false, "保存确认超时，无法确认稿件已落盘");
     }, 8000);
+    const onReply = (_e, payload) => {
+      /* 渲染进程回复 saved:false（保存失败/用户取消）时，退出被推迟 */
+      finish(!(payload && payload.saved === false), payload && payload.note);
+    };
     try {
       win.webContents.send("notefly:before-quit", { reason });
-      /* 渲染进程回复 saved:false（保存失败）时，退出被推迟 */
-      const onReply = (_e, payload) => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        ipcMainRemove("notefly:quit-reply", onReply);
-        resolve(!(payload && payload.saved === false));
-      };
       require("electron").ipcMain.on("notefly:quit-reply", onReply);
     } catch {
-      clearTimeout(timer);
-      resolve(true);
+      finish(false, "无法通知渲染进程保存");
     }
   });
 }
@@ -374,12 +395,48 @@ function waitForTasksToSettle(timeoutMs) {
 /**
  * 更新重启：允许更新器退出并重新启动。
  * 不再走「隐藏」分支 —— 否则更新器永远等不到进程退出。
+ *
+ * 与普通退出共用同一套守卫（对应「安装前必须安全退出」）：
+ *   1. 渲染进程保存稿件 —— 失败/超时/取消 → 推迟安装，恢复界面；
+ *   2. 等待真实在途任务落定（含接入统一进度中心的发布任务）→ 未落定 → 推迟安装；
+ *   3. 都满足后才销毁窗口、交给安装器。
  */
 async function quitForUpdate(reason) {
-  state.phase = "updating";
   const win = state.mainWindow;
-  /* 通知渲染进程保存 */
-  try { await notifyRendererSave(reason || "更新重启"); } catch { /* 忽略 */ }
+
+  /* 1. 保存稿件：失败必须推迟安装，绝不能带着未保存内容重启 */
+  try { win && !win.isDestroyed() && win.show(); } catch { /* 忽略 */ }
+  const r = await notifyRendererSave(reason || "更新重启");
+  if (!r.saved) {
+    try {
+      const { Notification } = require("electron");
+      if (Notification && Notification.isSupported()) {
+        new Notification({
+          title: "更新已推迟：稿件未保存",
+          body: r.note || "有稿件没有保存成功，已保留窗口与编辑内容。处理后再更新。",
+        }).show();
+      }
+    } catch { /* 忽略 */ }
+    return { ok: false, error: "稿件保存失败，已推迟安装（" + (r.note || "保存未确认") + "）" };
+  }
+
+  /* 2. 等待在途任务落定（有超时，不无限等） */
+  const settled = await waitForTasksToSettle(15000);
+  if (!settled) {
+    try {
+      const { Notification } = require("electron");
+      if (Notification && Notification.isSupported()) {
+        new Notification({
+          title: "更新已推迟：任务未结束",
+          body: "有采集、生成或发布任务尚未结束。任务完成后再更新，避免打断执行。",
+        }).show();
+      }
+    } catch { /* 忽略 */ }
+    return { ok: false, error: "有任务正在执行，已推迟安装" };
+  }
+
+  /* 3. 守卫全部通过：销毁窗口，交给安装器 */
+  state.phase = "updating";
   try { await notifyRendererShutdown(); } catch { /* 忽略 */ }
   destroyTray();
   if (win && !win.isDestroyed()) {

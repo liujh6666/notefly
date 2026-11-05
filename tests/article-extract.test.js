@@ -117,3 +117,67 @@ test("HTML 转文本：解码常见实体", () => {
   assert.ok(t.includes("A&B"));
   assert.ok(t.includes("C"));
 });
+
+/* ---- 嵌套容器抽取（对应验收问题 5：正文截断却返回成功）----
+ * 旧实现 `([\s\S]*?)<\/tag>` 在第一个同名闭合标签就截断，
+ * 长开头让最小长度检查通过 → 不完整正文被当作成功。 */
+test("嵌套抽取：#id 容器里的同名子标签不能截断正文", () => {
+  const html = [
+    '<html><head><title>嵌套测试</title></head><body>',
+    '<div id="js_content">',
+    '<div>这是足够长的开头段落，用来描述背景与上下文，重复填充以保证超过最小正文长度检查线。',
+    '继续补充一句，让开头部分明确超过八十字的阈值，模拟真实的公众号文章首段内容。</div>',
+    '<p>重要结论和后续正文：迁移必须在演练之后执行。</p>',
+    '<p>末段：全文完。</p>',
+    '</div>',
+    '</body></html>',
+  ].join("");
+  const inner = extractor.extractBySelector(html, "#js_content");
+  assert.ok(inner.includes("足够长的开头"), "首段必须在");
+  assert.ok(inner.includes("重要结论和后续正文"), "嵌套 div 之后的段落不能被截掉");
+  assert.ok(inner.includes("末段：全文完"), "容器末尾不能被截掉");
+
+  const r = extractor.extractArticle(html, { finalUrl: "https://mp.weixin.qq.com/s/x" });
+  assert.equal(r.ok, true);
+  assert.ok(r.bodyText.includes("重要结论"), "完整正文必须包含中段");
+  assert.ok(r.bodyText.includes("末段"), "完整正文必须包含末段");
+});
+
+test("嵌套抽取：多层 section 嵌套也能配平", () => {
+  const html = [
+    '<body>',
+    '<section class="rich_media_content">',
+    '<section><section><p>第一层深处的开头文字，写得很长很长，主要用来占位超过最小长度阈值线，',
+    '再补一句确保长度达标，模拟真实文章开头段落的样子。</p></section></section>',
+    '<p>中段关键句：配置中心是稳定性的前提。</p>',
+    '</section>',
+    '</body>',
+  ].join("");
+  const inner = extractor.extractBySelector(html, ".rich_media_content");
+  assert.ok(inner.includes("中段关键句"), "多层嵌套后内容必须完整");
+});
+
+test("嵌套抽取：属性值里的 > 与自闭合标签不干扰配平", () => {
+  const html = [
+    '<div id="js_content" data-x="a > b">',
+    '<p>开头段落，写得足够长以便通过正文最小长度检查，这里继续补充内容保证长度超过阈值。',
+    '再补充一行让首段长度超过八十字，模拟真实长文的开头。</p>',
+    '<img src="https://example.com/a.png"/>',
+    '<p>结论段：图片之后的文字必须在。</p>',
+    '</div>',
+  ].join("");
+  const inner = extractor.extractBySelector(html, "#js_content");
+  assert.ok(inner.includes("结论段"), "自闭合 img 之后的段落必须在");
+});
+
+test("article 标签选择器：嵌套 article 不截断", () => {
+  const html = [
+    '<article>',
+    '<article>作者简介：某人，长期写数据库相关内容，这里写足够长的简介文字来确保',
+    '这段文字单独看也能超过最小长度线，继续补充内容。</article>',
+    '<p>正文真正的结尾：总结陈词。</p>',
+    '</article>',
+  ].join("");
+  const inner = extractor.extractBySelector(html, "article");
+  assert.ok(inner.includes("正文真正的结尾"), "内层 article 闭合后外层必须继续");
+});

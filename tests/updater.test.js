@@ -151,3 +151,39 @@ test("检查流程：没有配置仓库时明确报错", async () => {
   assert.equal(r.code, "no_repo");
   assert.match(r.error, /owner\/repo/);
 });
+
+/* ---- 检查结果的持久化口径（update-routes.applyCheckResult）----
+ * 对应验收问题 11：已是最新版本绝不能持久化成 available 或 failed */
+test("检查结果持久化：已是最新 → up_to_date，不留新版本号", () => {
+  process.env.NOTEFLY_DATA_DIR = require("fs").mkdtempSync(require("path").join(require("os").tmpdir(), "notefly-upd-"));
+  delete require.cache[require.resolve("../lib/update-routes")];
+  const updateRoutes = require("../lib/update-routes");
+  /* updater.check 的真实返回形状：ok:false + upToDate:true（必须先判 upToDate 再判 ok） */
+  const r = updateRoutes.applyCheckResult({ ok: false, code: "up_to_date", upToDate: true, error: "当前已是最新版本" }, "1.9.1");
+  assert.equal(r.ok, true);
+  assert.equal(r.upToDate, true);
+  const st = updateRoutes.controller.getState();
+  assert.equal(st.lastResult, "up_to_date", "已是最新必须持久化为 up_to_date");
+  assert.equal(st.lastVersion, "", "已是最新时不留「新版本号」");
+});
+
+test("检查结果持久化：发现新版本 → available + 版本号", () => {
+  const updateRoutes = require("../lib/update-routes");
+  const r = updateRoutes.applyCheckResult({ ok: true, version: "2.0.0" }, "1.9.1");
+  assert.equal(r.ok, true);
+  assert.equal(r.version, "2.0.0");
+  const st = updateRoutes.controller.getState();
+  assert.equal(st.lastResult, "available");
+  assert.equal(st.lastVersion, "2.0.0");
+});
+
+test("检查结果持久化：失败 → failed，并清掉不可信的已下载记录", () => {
+  const updateRoutes = require("../lib/update-routes");
+  updateRoutes.controller.reportProgress({ lastDownload: { version: "2.0.0", at: new Date().toISOString() } });
+  const r = updateRoutes.applyCheckResult({ ok: false, error: "网络超时" }, "1.9.1");
+  assert.equal(r.ok, false);
+  const st = updateRoutes.controller.getState();
+  assert.equal(st.lastResult, "failed");
+  assert.equal(st.lastVersion, "");
+  assert.equal(st.lastDownload, null, "检查失败后已下载记录必须清除");
+});

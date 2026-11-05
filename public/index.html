@@ -1855,7 +1855,7 @@ const app = createApp({
       ceBack: "contents", ceForm: {}, ceMode: "split", ceSaving: false, ceDirty: false, ceEditing: false,
       /* 公众号排版：模板清单 / 模板选择器 / 渲染产物 */
       gzhTemplates: [], gzhPickerVisible: false, gzhPicked: "", coverPickerVisible: false,
-      gzhHtml: "", gzhLoading: false, gzhWarn: "",
+      gzhHtml: "", gzhLoading: false, gzhWarn: "", gzhMedia: null,
       amVisible: false, amForm: {},
       taskVisible: false, curTask: null, taskTargets: [], submitBusy: false,
       cfg: { checkInterval: null, authorName: "", authorBio: "", dataDir: "", dataDirIsDefault: true },
@@ -3474,16 +3474,39 @@ const app = createApp({
       ElMessage.success("已保存更新设置");
     }
 
-    /* 「立即更新」：明确说明将下载、安装并重新打开 */
+    /* 「立即更新」：明确说明将下载、安装并重新打开。
+       已下载完成的版本直接进入安装，不再重复下载。 */
     async function startUpdate(release) {
       if (!release) return;
-      await ElMessageBox.confirm(
-        "将下载新版本安装包，完成后会自动安装并重新打开 NoteFly。下载期间请不要强制结束程序。",
-        "立即更新 v" + release.version,
-        { type: "info", confirmButtonText: "下载并安装", cancelButtonText: "稍后" }
-      ).catch(() => { return; });
+      /* 取消/关闭弹窗/Esc → 直接返回，绝不发起下载 */
+      let confirmed = false;
+      try {
+        await ElMessageBox.confirm(
+          "将下载新版本安装包，完成后会自动安装并重新打开 NoteFly。下载期间请不要强制结束程序。",
+          "立即更新 v" + release.version,
+          { type: "info", confirmButtonText: "下载并安装", cancelButtonText: "稍后" }
+        );
+        confirmed = true;
+      } catch { confirmed = false; }
+      if (!confirmed) return;
       /* 桌面版：走主进程下载 + 安装 */
       if (window.notefly && window.notefly.isElectron) {
+        /* 已下载待安装：确认后直接安装并重启 */
+        try {
+          const st = await api("/update/state");
+          const dl = st && st.downloaded;
+          if (st && st.ok && dl && dl.version && dl.version === release.version) {
+            await ElMessageBox.confirm(
+              "安装包 v" + dl.version + " 已下载完成，将安装并重新打开 NoteFly。",
+              "安装更新 v" + dl.version,
+              { type: "info", confirmButtonText: "安装并重启", cancelButtonText: "稍后" }
+            );
+            const ins = await api("/update/install", { method: "POST", body: { version: dl.version } });
+            if (!ins.ok) { ElMessage.warning((ins && ins.error) || "无法开始安装"); return; }
+            ElMessage.info("正在安装更新，NoteFly 将自动重新打开");
+            return;
+          }
+        } catch { /* 状态查询失败或用户取消 → 继续常规下载流程 */ }
         const dl = await api("/update/download", { method: "POST", body: { releaseUrl: release.url || "" } });
         if (!dl.ok) {
           /* 服务端判定当前形态不支持自动安装（浏览器版 / 开发态）→ 兜底打开发布页，不留死路 */
@@ -3496,7 +3519,7 @@ const app = createApp({
           }
           return;
         }
-        ElMessage.info("正在下载更新包，可在消息中心看进度");
+        ElMessage.info("正在下载更新包，下载完成后在消息中心点「立即更新」完成安装");
         await loadTasks();
         openMsgDrawer();
         state.msgTab = "running";
@@ -3867,12 +3890,20 @@ const app = createApp({
     /* 渲染正文 → 公众号内联样式 HTML（服务端渲染，前端只负责展示与导出） */
     let gzhTimer = null;
     let gzhSeq = 0;
+    /* 预览版本签名：正文/主题/标题/封面/作者任一变化都算新版本。
+       复制与导出前必须核对 —— 只改了标题就复制，会粘出去一份旧渲染。 */
+    const gzhRenderSignature = () => JSON.stringify([
+      state.ceForm.body, state.ceForm.gzhTheme, state.ceForm.title,
+      state.ceForm.cover, gzhAuthor.value,
+    ]);
+    let gzhRenderedSig = "";
     async function refreshGzhPreview() {
       const body = String(state.ceForm.body || "");
       const themeId = state.ceForm.gzhTheme;
       if (!themeId || !body.trim()) {
         state.gzhHtml = "";
         state.gzhWarn = "";
+        gzhRenderedSig = "";
         return;
       }
       const seq = ++gzhSeq;
@@ -3886,10 +3917,13 @@ const app = createApp({
       if (!r.ok) {
         state.gzhHtml = "";
         state.gzhWarn = r.error || "排版失败";
+        gzhRenderedSig = "";
         return;
       }
       state.gzhHtml = r.html || "";
       state.gzhWarn = (r.errors && r.errors.length) ? r.errors[0] : ((r.warnings && r.warnings.length) ? r.warnings[0] : "");
+      state.gzhMedia = r.media || null;
+      gzhRenderedSig = gzhRenderSignature();
     }
     /* 正文改动后自动刷新（防抖），只对公众号形态生效 */
     watch(() => state.ceForm.body, () => {
@@ -3906,10 +3940,31 @@ const app = createApp({
       state.ceDirty = true;
     }
 
+    /* 复制/导出前的公共守卫：
+       1. 预览不是最新版本（只改了标题/封面/作者等）→ 先重新渲染；
+       2. 正文里有本地图片 → 明确告知「粘贴后图片不会显示」，用户确认才继续 */
+    async function ensureGzhFresh() {
+      if (state.gzhHtml && gzhRenderedSig !== gzhRenderSignature()) {
+        await refreshGzhPreview();
+        if (gzhRenderedSig !== gzhRenderSignature()) {
+          throw new Error("预览刷新失败，暂不复制/导出旧版本内容");
+        }
+      }
+      if (state.gzhMedia && state.gzhMedia.localImages > 0) {
+        try {
+          await ElMessageBox.confirm(state.gzhMedia.message + " 仍要继续复制/导出吗？", "图片未就绪", {
+            type: "warning", confirmButtonText: "仍要继续", cancelButtonText: "先不导出",
+          });
+        } catch { return false; }
+      }
+      return true;
+    }
+
     /* 复制到公众号：把渲染后的富文本写进剪贴板，粘到公众号编辑器样式不丢 */
     async function copyGzhHtml() {
       if (!state.gzhHtml) return;
       try {
+        if (!(await ensureGzhFresh())) return;
         /* 用离屏容器承载富文本，浏览器复制的是渲染后的 DOM（含内联样式） */
         const box = document.createElement("div");
         box.style.position = "fixed";
@@ -3934,8 +3989,14 @@ const app = createApp({
     }
 
     /* 导出 HTML：生成公众号正文片段（不含文档外壳，公众号只接受正文片段） */
-    function exportGzhHtml() {
+    async function exportGzhHtml() {
       if (!state.gzhHtml) return;
+      try {
+        if (!(await ensureGzhFresh())) return;
+      } catch (e) {
+        ElMessage.warning(String((e && e.message) || e));
+        return;
+      }
       const title = (state.ceForm.title || "未命名").replace(/[\\/:*?"<>|]/g, "_");
       const blob = new Blob([state.gzhHtml], { type: "text/html;charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -4508,22 +4569,29 @@ const app = createApp({
           duration: 0,
         });
       });
-      /* 退出前：保存未保存的稿件，回复主进程 */
+      /* 退出前：保存未保存的稿件，回复主进程。
+         有 id 就更新现有稿件（PUT），绝不新建副本；保存失败必须回 saved:false，
+         主进程据此推迟退出 —— 宁可不退出，也不能丢稿。 */
       window.notefly.on("notefly:before-quit", async (p) => {
         let saved = true;
+        let note = "";
         try {
           if (state.ceDirty && state.ceForm && (state.ceForm.body || state.ceForm.title)) {
-            /* 有未保存内容 → 先存草稿 */
-            const r = await api("/contents", { method: "POST", body: Object.assign({}, state.ceForm, { draft: true }) });
+            /* 有未保存内容 → 先存草稿（NFContent.save 自动区分新建/更新） */
+            const r = await NFContent.save(api, Object.assign({}, state.ceForm, { draft: true }));
             saved = !!r.ok;
             if (!saved) {
-              await ElMessageBox.alert("稿件保存失败：" + (r.error || "未知原因") + "\n请处理后再退出。", "无法保存", { type: "error" });
+              note = r.error || "保存请求未确认";
+              try {
+                await ElMessageBox.alert("稿件保存失败：" + note + "\n请处理后再退出。", "无法保存", { type: "error" });
+              } catch { /* 弹窗失败不影响回报 */ }
             }
           }
         } catch (e) {
           saved = false;
+          note = String((e && e.message) || e);
         }
-        window.notefly.replyQuit(saved);
+        window.notefly.replyQuit(saved, note);
       });
     }
 

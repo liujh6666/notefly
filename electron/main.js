@@ -142,8 +142,16 @@ if (!gotLock) {
       download: async () => {
         const c = await updater.check();
         if (!c.ok) return c;
-        return updater.download();
+        const r = await updater.download();
+        /* 用户取消：回报 download-cancelled，服务端把任务从 cancelling 转 cancelled */
+        if (r && r.cancelled) {
+          try {
+            lifecycle.callServer("/api/update/progress", "POST", { type: "download-cancelled" });
+          } catch { /* 忽略 */ }
+        }
+        return r;
       },
+      cancelDownload: async () => updater.cancelDownload(),
       install: async () => {
         const guard = await lifecycle.quitForUpdate("安装更新");
         if (!guard.ok) return guard;

@@ -20,6 +20,31 @@ const library = require("./lib/content-library");
 const libraryRoutes = require("./lib/library-routes");
 const updateRoutes = require("./lib/update-routes");
 
+/* ---- 可控发布替身（仅测试）----
+ * NOTEFLY_RPA_STUB=1 时把真实浏览器发布换成内存替身：
+ * 端到端测试可以验证「发布任务 → 统一进度中心 → 状态归并」的完整接线，
+ * 而不必真的打开任何平台网站。生产路径绝不设置这个变量。
+ * 替身行为：逐账号回 onProgress（filling → published），全部成功。 */
+if (process.env.NOTEFLY_RPA_STUB === "1") {
+  const STUB_DELAY_MS = Math.max(0, Number(process.env.NOTEFLY_RPA_STUB_DELAY_MS) || 0);
+  const stubSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  rpa.publish = async (snapshot, accountIds, mode, hooks) => {
+    const targets = [];
+    for (const id of accountIds || []) {
+      const platform = String(id).split("-")[0];
+      if (STUB_DELAY_MS) await stubSleep(STUB_DELAY_MS);
+      if (hooks && hooks.onProgress) {
+        hooks.onProgress(platform, { platform, status: "filling" });
+        hooks.onProgress(platform, { platform, status: "published" });
+      }
+      targets.push({ platform, status: "published", url: "https://example.com/" + platform });
+    }
+    return { groupId: "stub_" + Date.now().toString(36), targets, mode: mode || "draft" };
+  };
+  rpa.closeAll = async () => {};
+  rpa.resetContext = async () => {};
+}
+
 const PORT = process.env.PORT || 3210;
 /* 应用版本：与 package.json 保持一致（发布时同步） */
 const APP_VERSION = (() => {
@@ -62,11 +87,14 @@ function reloadDataModules() {
   try { taskProgress.init(); } catch { /* 忽略 */ }
   try { messages.init(); } catch { /* 忽略 */ }
   try { library.init(); } catch { /* 忽略 */ }
-  /* 当前企业在新目录里可能不存在了 */
-  if (currentCompanyId && !library.getCompany(currentCompanyId)) {
-    currentCompanyId = "";
-    config.currentCompanyId = "";
-  }
+  /* 当前企业以新目录的配置为准：切换目录（含恢复默认）后，
+     config 已被新目录的 config.json 覆盖，运行时变量必须跟着恢复。
+     只在「新目录里不存在」时才清空，绝不能沿用旧目录的企业 ID。 */
+  let cid = typeof config.currentCompanyId === "string" ? config.currentCompanyId : "";
+  if (cid && !library.getCompany(cid)) cid = "";
+  if (!cid) config.currentCompanyId = "";
+  else config.currentCompanyId = cid;
+  currentCompanyId = cid;
 }
 
 /* ---------------- 存储层 ----------------
@@ -431,6 +459,19 @@ async function runPublishQueue() {
     publishQueue.running = false;
   }
 }
+/* 目标状态 → 进度中心里的人话 */
+const TARGET_STAGE_LABEL = {
+  pending: "排队中", ready: "已就绪", filling: "正在填充", draft_saving: "正在存草稿",
+  submitting: "正在提交", accepted: "平台已受理", reviewing: "平台审核中",
+  published: "已发布", success: "发布成功", needs_manual: "停在草稿，待人工确认",
+  failed: "失败", unknown: "结果待核验",
+};
+function publishStageNote(progressTargets) {
+  const vals = Object.values(progressTargets || {});
+  if (!vals.length) return "正在启动发布引擎…";
+  return vals.map((t) => `${t.platform}：${TARGET_STAGE_LABEL[t.status] || t.status}`).join("；");
+}
+
 async function executeRpaTask(task) {
   const runToken = { id: task.id };
   activeRuns.set(task.id, runToken);
@@ -445,6 +486,49 @@ async function executeRpaTask(task) {
     console.error("[队列] 任务状态落盘失败，跳过:", task.id, e.message);
     return;
   }
+  /* 接入统一进度中心：发布主任务 + 逐平台进度都要在进度中心可见。
+     退出等待逻辑（waitForTasksToSettle）查的就是这里 —— 不接入会导致
+     「发布进行中却被判定无在途任务」而错误退出。 */
+  let progressId = null;
+  let progressDone = false;
+  try {
+    const p = taskProgress.create({
+      type: "publish",
+      title: "发布：" + (task.title || (task.snapshot && task.snapshot.title) || "(无标题)"),
+      total: (task.accountIds || []).length || null,
+      cancellable: false,   /* 已向平台提交的动作不能靠取消按钮假装撤销 */
+      stage: "starting",
+      stageNote: "正在启动发布引擎…",
+      route: "tasks",
+    });
+    progressId = p.id;
+  } catch { /* 进度记录失败不影响发布本身 */ }
+  const finishProgress = (task2) => {
+    if (!progressId || progressDone) return;
+    progressDone = true;
+    try {
+      const st = task2 && task2.status;
+      if (st === taskStatus.TASK.DONE) {
+        taskProgress.succeed(progressId, { taskId: task2.id });
+      } else if (st === taskStatus.TASK.FAILED) {
+        taskProgress.fail(progressId, task2.error || "发布失败", task2.statusReason || "");
+      } else {
+        /* 执行已结束（不再占用后台），但要如实表达各自的终态，绝不写成「全部成功」 */
+        const NOTE = {
+          [taskStatus.TASK.NEEDS_MANUAL]: "已停在草稿，待人工确认",
+          [taskStatus.TASK.DRAFT_READY]: "草稿已就绪，待人工确认发布",
+          [taskStatus.TASK.PARTIAL]: "部分平台成功，详见发布记录",
+          [taskStatus.TASK.UNKNOWN]: "执行结束，结果待核验",
+        };
+        taskProgress.update(progressId, {
+          status: taskProgress.STATUS.SUCCESS,
+          stage: st === taskStatus.TASK.UNKNOWN ? "verify" : "done",
+          stageNote: NOTE[st] || "执行结束",
+          result: { taskId: task2 && task2.id, taskStatus: st || "" },
+        });
+      }
+    } catch { /* 忽略 */ }
+  };
   try {
     const result = await rpa.publish(task.snapshot, task.accountIds, task.mode || "draft", {
       /* 逐目标持久化：第一个平台完成就落盘，第二个平台卡死也不丢第一阶段记录 */
@@ -457,6 +541,16 @@ async function executeRpaTask(task) {
           task.history = task.history || [];
           task.history.push({ at: new Date().toISOString(), event: "target_progress", detail: `${platform} → ${target.status}` });
           saveStore();
+          /* 同步推进进度中心：已落定的目标数做分子，平台状态做人话阶段 */
+          if (progressId && !progressDone) {
+            const settled = Object.values(task.progressTargets)
+              .filter((t) => ["published", "success", "needs_manual", "failed", "unknown", "accepted", "reviewing"].includes(t.status)).length;
+            taskProgress.update(progressId, {
+              completed: settled,
+              stage: "filling",
+              stageNote: publishStageNote(task.progressTargets),
+            });
+          }
         } catch { /* 进度落盘失败不影响执行 */ }
       },
     });
@@ -466,6 +560,7 @@ async function executeRpaTask(task) {
       task.history = task.history || [];
       task.history.push({ at: new Date().toISOString(), event: "stale_result_discarded" });
       try { saveStore(); } catch { /* 忽略 */ }
+      finishProgress(task);
       return task;
     }
     /* 合并逐目标进度与最终结果：最终结果优先，进度补齐没走完的目标 */
@@ -485,6 +580,7 @@ async function executeRpaTask(task) {
     try { saveStore(); } catch (e2) { console.error("[队列] 结果落盘失败:", e2.message); }
   } finally {
     if (activeRuns.get(task.id) === runToken) activeRuns.delete(task.id);
+    finishProgress(task);
   }
 }
 
@@ -1434,6 +1530,8 @@ libraryRoutes.registerLibraryRoutes(app, {
  * 统一后台任务记录 + 右上角消息中心。详见 lib/progress-routes.js。 */
 progressRoutes.registerProgressRoutes(app, {
   getCurrentCompanyId: () => currentCompanyId,
+  /* 更新桥：取消下载类任务时要通知主进程真正停掉 electron-updater 的下载 */
+  updateBridge: () => globalThis.NOTEFLY_UPDATE_BRIDGE || null,
 });
 
 /* ---------------- 软件更新 ----------------
