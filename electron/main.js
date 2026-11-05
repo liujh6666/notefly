@@ -129,6 +129,11 @@ if (!gotLock) {
        之前设置 —— 服务端读的是 require 时刻的环境。 */
     process.env.NOTEFLY_FORM = "desktop";
     process.env.NOTEFLY_PACKAGED = app.isPackaged ? "1" : "0";
+    /* 打包版的应用目录在 asar 里只读，数据必须落到用户数据区
+       （%APPDATA%/NoteFly/data）。仅在打包时设置 —— 开发态仍用项目内 data/。 */
+    if (app.isPackaged) {
+      process.env.NOTEFLY_DEFAULT_DATA_DIR = path.join(app.getPath("userData"), "data");
+    }
     require("../server.js");
     /* 等服务就绪 */
     for (let i = 0; i < 40; i++) {

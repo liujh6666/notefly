@@ -1,6 +1,6 @@
 {
   "name": "notefly",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "private": true,
   "description": "NoteFly · 本地多平台内容分发工作台，单引擎：NoteFly RPA",
   "license": "MIT",
@@ -66,7 +66,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "public/app.ico",
@@ -84,14 +86,19 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "category": "public.app-category.productivity",
       "artifactName": "NoteFly-${version}-${arch}.${ext}"
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "category": "Office",
       "artifactName": "NoteFly-${version}-${arch}.${ext}"
     },

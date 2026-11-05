@@ -29,3 +29,6 @@ Thumbs.db
 
 /* 工作区内部笔记 */
 .workbuddy/
+
+/* 打包产物（进 GitHub Releases，不入库） */
+dist/
