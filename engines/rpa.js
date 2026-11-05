@@ -782,7 +782,11 @@ function genericArticleAdapter(cfg) {
       ];
       let done = false;
       let lastErr = "";
-      for (const sel of bodySels) {
+      /* 正文候选轮询等待最多 15s：编辑器 JS 初始化可能比标题框慢
+         （搜狐号冷启动首开时 .ql-editor 迟到，一次性检查会假报「编辑器未找到」） */
+      const bodyDeadline = Date.now() + 15000;
+      while (!done && Date.now() < bodyDeadline) {
+        for (const sel of bodySels) {
         const el = await page.$(sel).catch(() => null);
         if (!el) continue;
         // 不可见的编辑器元素（如 CSDN 页面上隐藏的反馈 textarea）绝不能拿来填正文
@@ -817,6 +821,8 @@ function genericArticleAdapter(cfg) {
           lastErr = String(e.message || e);
         }
       }
+        if (!done) await sleep(1200);
+      }
       // iframe 兜底：UEditor 系（大鱼号等）把编辑区放在 iframe 的 body 里，
       // 主文档选择器永远找不到
       if (!done) {
@@ -835,6 +841,24 @@ function genericArticleAdapter(cfg) {
       }
       if (!done) throw new Error(`[${cfg.label}] 正文填充失败（编辑器未找到或改版）${lastErr ? "：" + lastErr : ""}`);
       await sleep(1500);
+    },
+    /* 草稿模式收尾：点平台的「存草稿」，让内容真正落到草稿箱。
+       没配置存草稿按钮 / 按钮点不到时不算失败 —— 内容还在编辑器里，人工可存可发。 */
+    async saveDraft(page) {
+      if (cfg.draftAutoSave) return { ok: true, detail: "平台自动保存草稿，无需手动存" };
+      const sels = cfg.draftSaveSel || [];
+      for (const sel of sels) {
+        const btn = await waitSel(page, sel, 4000).catch(() => null);
+        if (!btn) continue;
+        if (!(await btn.isVisible().catch(() => false))) continue;
+        /* 文案防线：按钮文本必须含 存草稿/保存/草稿，防止点错「发布」类按钮 */
+        const txt = (await btn.innerText().catch(() => "")) || "";
+        if (!/草稿|保存/.test(txt)) continue;
+        await btn.click().catch(() => {});
+        await sleep(2500);
+        return { ok: true, detail: `已点击「${txt.trim().slice(0, 8)}」，草稿已请求保存` };
+      }
+      return { ok: false, detail: "未找到存草稿按钮，内容停留在编辑器页，请人工保存或发布" };
     },
     async submit(page) {
       const sel = cfg.submitSel || 'button:has-text("发布"), button:has-text("发表")';
@@ -864,6 +888,8 @@ const ADAPTERS_EXTRA = {
        旧 .CodeMirror（CM5 API）失效；页面上还有隐藏的反馈 textarea，
        因此候选列表必须先验可见性（fill 循环已内置 isVisible 过滤） */
     bodySel: ["pre.editor__inner", ".CodeMirror", "div[contenteditable='true']", "textarea"],
+    /* 2026-11-05 实机探针：工具栏「保存草稿」button.btn-save（el-popover__reference） */
+    draftSaveSel: ["button.btn-save"],
   }),
   toutiao: genericArticleAdapter({
     label: "头条号",
@@ -873,6 +899,8 @@ const ADAPTERS_EXTRA = {
     bodySel: [".ProseMirror", "div[contenteditable='true']"],
     titleMax: 30,
     submitSel: 'button:has-text("发布"), button:has-text("发表")',
+    /* 2026-11-05 实机探针：头条号编辑页左下角「草稿将自动保存」，无需点按钮 */
+    draftAutoSave: true,
   }),
   baijiahao: genericArticleAdapter({
     label: "百家号",
@@ -888,6 +916,8 @@ const ADAPTERS_EXTRA = {
     bodySel: ['div[class*="FeEditor"][contenteditable="true"]', ".ProseMirror", ".w-e-text[contenteditable]", "div[contenteditable='true']"],
     titleMax: 64,
     plainText: false,
+    /* 2026-11-05 实机探针：右上「存草稿」cheetah-btn */
+    draftSaveSel: ['button:has-text("存草稿")'],
   }),
   sohu: genericArticleAdapter({
     label: "搜狐号",
@@ -900,6 +930,8 @@ const ADAPTERS_EXTRA = {
     titleSel: 'input[placeholder*="标题"]',
     bodySel: [".ql-editor", ".w-e-text[contenteditable]", ".ProseMirror", "div[contenteditable='true']"],
     plainText: true,
+    /* 2026-11-05 实机探针：右上「存草稿」li.publish-report-btn */
+    draftSaveSel: [".publish-report-btn"],
   }),
   oschina: genericArticleAdapter({
     label: "开源中国",
@@ -917,6 +949,8 @@ const ADAPTERS_EXTRA = {
     entrySel: 'a[href="#/Writing/articleEditor"]',
     titleSel: 'input[placeholder*="标题"]',
     bodySel: [".ProseMirror", "div[contenteditable='true']"],
+    /* 一点号编辑器存草稿按钮未实测，给通用候选；找不到时回退停在编辑器 */
+    draftSaveSel: ['button:has-text("存草稿")', 'button:has-text("保存")'],
   }),
   dayu: genericArticleAdapter({
     label: "大鱼号",
@@ -924,6 +958,8 @@ const ADAPTERS_EXTRA = {
     homeUrl: "https://mp.dayu.com/",
     titleSel: 'input[placeholder*="标题"]',
     bodySel: [".ProseMirror", ".w-e-text[contenteditable]", "div[contenteditable='true']"],
+    /* 2026-11-05 实机探针：编辑区下方「保存」button.w-btn */
+    draftSaveSel: ['button.w-btn:has-text("保存")'],
   }),
   /* ---------- 第二批平台（参照同类分发产品扩充，均为纯文字创作后台） ---------- */
   weixin: genericArticleAdapter({
@@ -1090,8 +1126,21 @@ async function publish(snapshot, accountIds, mode = "draft", opts = {}) {
           submittedAt: new Date().toISOString(),
         });
       } else {
+        /* 草稿模式：填完后点「存草稿」，让草稿真正落进平台草稿箱
+           （此前只停在编辑器 —— 不自动保存的平台草稿箱里什么都没有）。
+           存草稿失败不算任务失败：内容还在编辑器里，人工可存可发。 */
+        let draftDetail = "";
+        if (typeof adapter.saveDraft === "function") {
+          const r = await adapter.saveDraft(page).catch((e) => ({ ok: false, detail: String(e.message || e).slice(0, 120) }));
+          draftDetail = r.detail || "";
+          if (!r.ok) logger.warn("发布引擎", `存草稿未完成（内容留在编辑器）：${platform}`, { 账号: accountId, 说明: draftDetail });
+          else logger.info("发布引擎", `已存草稿：${platform}`, { 账号: accountId, 说明: draftDetail });
+        }
         handles.push({ platform, accountId, page, state: "ready" });
-        targets.push({ platform, accountId, status: "ready" });
+        targets.push({
+          platform, accountId, status: "ready",
+          evidence: { stage: "draft", detail: draftDetail || "已填充内容，停在编辑器待人工确认" },
+        });
       }
       notify();
     } catch (e) {
