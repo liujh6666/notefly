@@ -757,6 +757,22 @@ function genericArticleAdapter(cfg) {
           }
         }
       }
+      // Lexical 单根编辑器（百家号 FeEditor）：标题与正文同一个 contenteditable，
+      // 第一行=标题。必须「标题→回车→正文」一次打完，分别填会把正文写进标题行
+      if (cfg.lexicalSingleRoot) {
+        const rootSel = (cfg.bodySel || ["div[contenteditable='true']"])[0];
+        const root = await waitSel(page, rootSel, 20000).catch(() => null);
+        if (!root) throw new Error(`[${cfg.label}] 未找到编辑器根元素`);
+        await root.evaluate((n) => n.focus());
+        const t0 = (snap.title || "").slice(0, cfg.titleMax || 64);
+        if (t0) {
+          await page.keyboard.insertText(t0);
+          await page.keyboard.press("Enter");
+        }
+        await page.keyboard.insertText(cfg.plainText ? plainTextOf(snap.body || "") : (snap.body || ""));
+        await sleep(1500);
+        return;
+      }
       // 标题
       const titleSel = cfg.titleSel || 'input[placeholder*="标题"], textarea[placeholder*="标题"]';
       const title = await waitSel(page, titleSel, 20000).catch(() => null);
@@ -860,6 +876,47 @@ function genericArticleAdapter(cfg) {
       }
       return { ok: false, detail: "未找到存草稿按钮，内容停留在编辑器页，请人工保存或发布" };
     },
+    /* 封面上传（DOM 路线）：点平台配置的封面入口 → 等 file 控件出现/文件对话框弹出 →
+       注入本地封面。参考 MultiPost/Wechatsync 的做法：能走平台接口的平台直接在
+       saveDraft 里一并传，不走这里。未配置入口的平台返回明确说明，不阻塞发布。 */
+    async uploadCover(page, snap) {
+      const local = resolveLocalMedia(snap && snap.cover);
+      if (!local) {
+        return { ok: false, detail: snap && snap.cover ? "封面不是本地文件，跳过上传" : "未设置封面" };
+      }
+      const injectIntoImageInputs = async () => {
+        const els = page.locator('input[type=file]');
+        const n = await els.count();
+        for (let i = 0; i < n; i++) {
+          const el = els.nth(i);
+          const accept = (await el.getAttribute("accept").catch(() => "")) || "";
+          if (!/image/i.test(accept)) continue;
+          await el.setInputFiles(local).catch(() => {});
+          await sleep(4000);
+          return true;
+        }
+        return false;
+      };
+      for (const sel of cfg.coverBtnSel || []) {
+        const btn = await page.$(sel).catch(() => null);
+        if (!btn || !(await btn.isVisible().catch(() => false))) continue;
+        const fcPromise = page.waitForEvent("filechooser", { timeout: 8000 }).catch(() => null);
+        await btn.click().catch(() => {});
+        /* 搜狐等平台点击后才挂载 image file input，轮询等待 */
+        for (let i = 0; i < 10; i++) {
+          await sleep(500);
+          if (await injectIntoImageInputs()) return { ok: true, detail: "封面已上传" };
+        }
+        const fc = await fcPromise;
+        if (fc) {
+          await fc.setFiles(local).catch(() => {});
+          await sleep(4000);
+          return { ok: true, detail: "封面已通过文件对话框上传" };
+        }
+      }
+      if (await injectIntoImageInputs()) return { ok: true, detail: "封面已注入页面上传控件" };
+      return { ok: false, detail: "未找到封面上传入口，请人工补传" };
+    },
     async submit(page) {
       const sel = cfg.submitSel || 'button:has-text("发布"), button:has-text("发表")';
       const btn = await waitSel(page, sel, 10000).catch(() => null);
@@ -871,6 +928,123 @@ function genericArticleAdapter(cfg) {
       }
     },
   };
+}
+
+/* ---------- 百家号接口存稿（移植 MultiPost-Extension baijiahao 适配器） ----------
+ * DOM 路线在百家号走不通：Lexical 编辑器封面上传面板只有「找素材」入口，
+ * 没有本地文件上传控件。MultiPost 的成熟做法是直接调平台内部接口：
+ *   1. marked 把 Markdown 转 HTML（vendor/marked.min.js 注入页面上下文）
+ *   2. 封面 → /materialui/picture/uploadProxy 上传 → CuttingPicproxy 裁横竖版
+ *   3. /pcui/article/save 一并提交标题/正文/封面（errno=0 返回草稿 id）
+ * 全部在页面上下文 fetch（credentials: include 自动带登录态），Token 取 localStorage。
+ */
+async function baijiahaoApiDraft(page, snap) {
+  const coverPath = resolveLocalMedia(snap && snap.cover);
+  const coverBuf = coverPath ? new Uint8Array(fs.readFileSync(coverPath)) : null;
+  const coverName = coverPath ? path.basename(coverPath) : "";
+  const markedPath = path.join(__dirname, "..", "public", "vendor", "marked.min.js");
+  const markedSrc = fs.existsSync(markedPath) ? fs.readFileSync(markedPath, "utf8") : "";
+  await page.evaluate((src) => {
+    if (src && !window.marked) {
+      try { (0, eval)(src); } catch { /* marked 不可用时回退简单换行转换 */ }
+    }
+  }, markedSrc);
+  const r = await page.evaluate(async ({ title, body, coverBuf, coverName }) => {
+    const html = (window.marked && typeof window.marked.parse === "function")
+      ? window.marked.parse(body || "")
+      : "<p>" + String(body || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>") + "</p>";
+    let coverImages = null, coverMap = null, verticalCover = "";
+    if (coverBuf) {
+      const token = (localStorage.getItem("edit-token") || "").replace(/"/g, "");
+      const file = new File([coverBuf], coverName || "cover", { type: "image/webp" });
+      const fd = new FormData();
+      fd.append("org_file_name", coverName || "cover");
+      fd.append("type", "image");
+      fd.append("app_id", "");
+      fd.append("is_waterlog", "1");
+      fd.append("save_material", "1");
+      fd.append("no_compress", "0");
+      fd.append("is_events", "");
+      fd.append("article_type", "news");
+      fd.append("media", file);
+      const up = await fetch("https://baijiahao.baidu.com/materialui/picture/uploadProxy", {
+        method: "POST", body: fd, credentials: "include", headers: { Token: token },
+      });
+      const ur = await up.json();
+      const src = ur && ur.ret && ur.ret.https_url;
+      if (!src) throw new Error("封面上传失败：" + JSON.stringify(ur).slice(0, 100));
+      const dims = await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+        img.onerror = () => resolve(null);
+        img.src = src;
+      });
+      if (!dims) throw new Error("封面尺寸获取失败");
+      const calc = (ratio) => {
+        let x = 0, y = 0, w, h;
+        if (dims.w / dims.h > ratio) { h = dims.h; w = Math.floor(h * ratio); x = Math.floor((dims.w - w) / 2); }
+        else { w = dims.w; h = Math.floor(w / ratio); y = Math.floor((dims.h - h) / 2); }
+        return { x, y, w, h };
+      };
+      const crop = async (p) => {
+        const cd = new FormData();
+        cd.append("auto", "true");
+        for (const [k, v] of Object.entries(p)) cd.append(k, String(v));
+        cd.append("src", src);
+        cd.append("type", "newsRow");
+        cd.append("cutting_type", "cover_image");
+        const cr = await (await fetch("https://baijiahao.baidu.com/pcui/Picture/CuttingPicproxy", { method: "POST", body: cd })).json();
+        return cr && cr.errno === 0 && cr.data && cr.data.https_src;
+      };
+      const cp1 = calc(1.5), cp2 = calc(0.75);
+      const hUrl = await crop(cp1);
+      const vUrl = await crop(cp2);
+      coverImages = [{ src: hUrl || src, cropData: { x: cp1.x, y: cp1.y, width: cp1.w, height: cp1.h }, machine_chooseimg: 0, isLegal: 0, cover_source_tag: "local" }];
+      coverMap = [{ src: hUrl || src, origin_src: src }];
+      verticalCover = vUrl || "";
+    }
+    const fd2 = new FormData();
+    const len = (new DOMParser().parseFromString(html, "text/html").documentElement.textContent || "").length;
+    fd2.append("type", "news");
+    fd2.append("title", (title || "").slice(0, 64));
+    fd2.append("content", html);
+    fd2.append("vertical_cover", verticalCover);
+    fd2.append("abstract", "");
+    fd2.append("len", String(len));
+    fd2.append("activity_list[0][id]", "ttv");
+    fd2.append("activity_list[0][is_checked]", "1");
+    fd2.append("activity_list[1][id]", "ai_tts");
+    fd2.append("activity_list[1][is_checked]", "1");
+    fd2.append("activity_list[2][id]", "reward");
+    fd2.append("activity_list[2][is_checked]", "1");
+    fd2.append("activity_list[3][id]", "aigc_bjh_status");
+    fd2.append("activity_list[3][is_checked]", "0");
+    fd2.append("source_reprinted_allow", "0");
+    fd2.append("is_auto_optimize_cover", "1");
+    fd2.append("abstract_from", "1");
+    fd2.append("cover_layout", "one");
+    fd2.append("cover_image_source[wide_cover_image_source]", "local");
+    fd2.append("isBeautify", "false");
+    fd2.append("usingImgFilter", "false");
+    fd2.append("first_exclusive_publish_v2", "3");
+    fd2.append("subtitle", "");
+    fd2.append("bjhtopic_id", "");
+    fd2.append("bjhtopic_info", "");
+    if (coverImages) {
+      fd2.append("cover_images", JSON.stringify(coverImages));
+      fd2.append("_cover_images_map", JSON.stringify(coverMap));
+    }
+    fd2.append("source", "upload");
+    fd2.append("cover_source", "upload");
+    const token2 = (localStorage.getItem("edit-token") || "").replace(/"/g, "");
+    const resp = await fetch("https://baijiahao.baidu.com/pcui/article/save?callback=bjhdraft", {
+      method: "POST", body: fd2, credentials: "include", headers: { Token: token2 },
+    });
+    const rj = await resp.json();
+    if (rj.errno !== 0) throw new Error("百家号存稿失败：" + String(rj.message || JSON.stringify(rj)).slice(0, 100));
+    return { id: (rj.ret && rj.ret.id) || "" };
+  }, { title: (snap && snap.title) || "", body: (snap && snap.body) || "", coverBuf, coverName });
+  return { ok: true, detail: "已通过百家号接口存草稿" + (r.id ? "（草稿 id " + r.id + "，含封面）" : "（无封面）"), draftId: r.id };
 }
 
 const ADAPTERS_EXTRA = {
@@ -902,23 +1076,46 @@ const ADAPTERS_EXTRA = {
     /* 2026-11-05 实机探针：头条号编辑页左下角「草稿将自动保存」，无需点按钮 */
     draftAutoSave: true,
   }),
-  baijiahao: genericArticleAdapter({
-    label: "百家号",
-    composeUrl: "https://baijiahao.baidu.com/builder/rc/edit?type=news",
-    homeUrl: "https://baijiahao.baidu.com/",
-    /* 首页是内容 feed（无任何登录证据）。登录检测走作者后台：
-       未登录必被重定向到 passport.baidu.com，登录后停在原页（2026-11-05 实机验证） */
-    checkUrl: "https://baijiahao.baidu.com/builder/rc/home",
-    consoleCheck: true,
-    titleSel: 'input[placeholder*="标题"]',
-    /* 2026-11 实机探针：百家号已换 FeEditor 新编辑器（contenteditable div）；
-       其 click 会被浮层命中检测卡到超时，fill 循环改用 focus() 绕过 */
-    bodySel: ['div[class*="FeEditor"][contenteditable="true"]', ".ProseMirror", ".w-e-text[contenteditable]", "div[contenteditable='true']"],
-    titleMax: 64,
-    plainText: false,
-    /* 2026-11-05 实机探针：右上「存草稿」cheetah-btn */
-    draftSaveSel: ['button:has-text("存草稿")'],
-  }),
+  baijiahao: (() => {
+    const base = genericArticleAdapter({
+      label: "百家号",
+      composeUrl: "https://baijiahao.baidu.com/builder/rc/edit?type=news",
+      homeUrl: "https://baijiahao.baidu.com/",
+      /* 首页是内容 feed（无任何登录证据）。登录检测走作者后台：
+         未登录必被重定向到 passport.baidu.com，登录后停在原页（2026-11-05 实机验证） */
+      checkUrl: "https://baijiahao.baidu.com/builder/rc/home",
+      consoleCheck: true,
+      titleSel: 'input[placeholder*="标题"]',
+      /* 2026-11-05 实机探针：百家号已换 FeEditor（Lexical）新编辑器，
+         标题与正文同一个 contenteditable 根（第一行=标题），且无 input 标题框；
+         其 click 会被浮层命中检测卡到超时，fill 循环改用 focus() 绕过 */
+      bodySel: ['div[class*="FeEditor"][contenteditable="true"]', ".ProseMirror", ".w-e-text[contenteditable]", "div[contenteditable='true']"],
+      titleMax: 64,
+      plainText: false,
+      lexicalSingleRoot: true,
+    });
+    /* 封面与存稿走平台内部接口（DOM 面板没有本地上传入口）；
+       接口失败回退 DOM 填充 + 存草稿按钮 */
+    return Object.assign({}, base, {
+      async fill(page, snap) {
+        page._nfSnap = snap; /* 快照暂存，saveDraft 回退 DOM 时用 */
+      },
+      async uploadCover() {
+        return { ok: true, detail: "封面随接口存稿一并上传" };
+      },
+      async saveDraft(page, snap) {
+        const s = snap || page._nfSnap || {};
+        try {
+          return await baijiahaoApiDraft(page, s);
+        } catch (e) {
+          logger.warn("发布引擎", "百家号接口存稿失败，回退 DOM 填充（无封面）", { 错误: String(e.message || e).slice(0, 150) });
+        }
+        await base.fill(page, s);
+        const dr = await base.saveDraft(page, s);
+        return { ok: dr.ok, detail: (dr.detail || "") + "；封面未能自动上传，请人工补传" };
+      },
+    });
+  })(),
   sohu: genericArticleAdapter({
     label: "搜狐号",
     /* 2026-11-05 实机探针（用户提供新创作中心地址后确认）：
@@ -930,8 +1127,11 @@ const ADAPTERS_EXTRA = {
     titleSel: 'input[placeholder*="标题"]',
     bodySel: [".ql-editor", ".w-e-text[contenteditable]", ".ProseMirror", "div[contenteditable='true']"],
     plainText: true,
-    /* 2026-11-05 实机探针：右上「存草稿」li.publish-report-btn */
-    draftSaveSel: [".publish-report-btn"],
+    /* 2026-11-05 实机探针：发布区有 发布/定时发布/存草稿 三个 li.publish-report-btn，
+       必须用文本限定锁定「存草稿」，否则会拿到「发布」 */
+    draftSaveSel: ['li.publish-report-btn:has-text("存草稿")'],
+    /* 封面：点「上传图片」div.upload-file.mp-upload 后才挂载 image file input */
+    coverBtnSel: ["div.upload-file.mp-upload"],
   }),
   oschina: genericArticleAdapter({
     label: "开源中国",
@@ -1126,20 +1326,27 @@ async function publish(snapshot, accountIds, mode = "draft", opts = {}) {
           submittedAt: new Date().toISOString(),
         });
       } else {
-        /* 草稿模式：填完后点「存草稿」，让草稿真正落进平台草稿箱
-           （此前只停在编辑器 —— 不自动保存的平台草稿箱里什么都没有）。
-           存草稿失败不算任务失败：内容还在编辑器里，人工可存可发。 */
-        let draftDetail = "";
+        /* 草稿模式：封面 → 存草稿。
+           （此前只停在编辑器 —— 不自动保存的平台草稿箱里什么都没有）
+           任一步没成功都不算任务失败：内容还在编辑器里，人工可补。 */
+        const notes = [];
+        if (typeof adapter.uploadCover === "function") {
+          const cr = await adapter.uploadCover(page, snapshot)
+            .catch((e) => ({ ok: false, detail: String(e.message || e).slice(0, 120) }));
+          notes.push("封面：" + (cr.detail || (cr.ok ? "已上传" : "未上传")));
+          if (!cr.ok && cr.detail) logger.warn("发布引擎", `封面未上传：${platform}`, { 说明: cr.detail });
+        }
         if (typeof adapter.saveDraft === "function") {
-          const r = await adapter.saveDraft(page).catch((e) => ({ ok: false, detail: String(e.message || e).slice(0, 120) }));
-          draftDetail = r.detail || "";
-          if (!r.ok) logger.warn("发布引擎", `存草稿未完成（内容留在编辑器）：${platform}`, { 账号: accountId, 说明: draftDetail });
-          else logger.info("发布引擎", `已存草稿：${platform}`, { 账号: accountId, 说明: draftDetail });
+          const dr = await adapter.saveDraft(page, snapshot)
+            .catch((e) => ({ ok: false, detail: String(e.message || e).slice(0, 120) }));
+          notes.push(dr.detail || "");
+          if (!dr.ok) logger.warn("发布引擎", `存草稿未完成（内容留在编辑器）：${platform}`, { 说明: dr.detail });
+          else logger.info("发布引擎", `已存草稿：${platform}`, { 说明: dr.detail });
         }
         handles.push({ platform, accountId, page, state: "ready" });
         targets.push({
           platform, accountId, status: "ready",
-          evidence: { stage: "draft", detail: draftDetail || "已填充内容，停在编辑器待人工确认" },
+          evidence: { stage: "draft", detail: notes.filter(Boolean).join("；") || "已填充内容，停在编辑器待人工确认" },
         });
       }
       notify();
@@ -1485,6 +1692,7 @@ async function resetContext() {
 module.exports = {
   listPlatforms, publish, submitTarget, refillTarget, checkLogin, openForLogin, importState,
   hasHandles, closeAll, clearProfile, resetContext, resolveLocalMedia,
+  baijiahaoApiDraft, /* 真机验证用 */
   /* 独立账号：账号 → 平台/分区解析、独立登录窗口、身份抓取、删号清分区 */
   setAccountResolver, accountInfo, openAccountLoginWindow, closeLoginWindow, removeAccountData, captureProfile,
   /* 供回归测试观察内部状态（可见性升级、平台能力表） */

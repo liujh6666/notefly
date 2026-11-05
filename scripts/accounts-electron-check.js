@@ -34,7 +34,7 @@ async function waitReady(retries = 60) {
 (async () => {
   const electronBin = path.join(ROOT, "node_modules", ".bin", process.platform === "win32" ? "electron.cmd" : "electron");
   const env = Object.assign({}, process.env, {
-    NOTEFLY_PORT: String(PORT), NOTEFLY_CDP_PORT: String(CDP_PORT), NOTEFLY_DATA_DIR: TMP,
+    NOTEFLY_PORT: String(PORT), NOTEFLY_CDP_PORT: String(CDP_PORT), NOTEFLY_DATA_DIR: TMP, NOTEFLY_TEST_MULTI: "1",
   });
   delete env.ELECTRON_RUN_AS_NODE;
   const child = spawn(electronBin, [ROOT], { cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32" });
